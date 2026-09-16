@@ -141,6 +141,15 @@ document.getElementById('teamInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitTeam();
 });
 document.getElementById('btnSubmitTeam').addEventListener('click', submitTeam);
+teamInput.addEventListener('focus', () => scrollButtonIntoView(btnSubmitTeam));
+
+function scrollButtonIntoView(btn) {
+  // Mobile keyboards shrink the visual viewport after a short animation,
+  // so wait a beat before scrolling the submit button into view.
+  setTimeout(() => {
+    btn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, 300);
+}
 
 function submitTeam() {
   const val = teamInput.value.trim();
@@ -206,6 +215,7 @@ document.getElementById('guessInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitGuess();
 });
 document.getElementById('btnSubmitGuess').addEventListener('click', submitGuess);
+guessInput.addEventListener('focus', () => scrollButtonIntoView(btnSubmitGuess));
 
 function submitGuess() {
   const val = guessInput.value.trim();
