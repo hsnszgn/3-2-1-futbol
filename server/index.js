@@ -6,7 +6,7 @@ const { randomUUID } = require('crypto');
 
 const { resolveTeam, normalize } = require('./data/teams');
 const { matchPlayerName } = require('./gameLogic');
-const { getCommonPlayers, resolveTeamByName } = require('./wikidata');
+const { getCommonPlayers, resolveTeamByName, prefetchSquad } = require('./wikidata');
 
 // The local alias list handles the common cases instantly ("Man United",
 // "GS"); anything it doesn't know — a club nobody added, or a Turkish name
@@ -328,6 +328,10 @@ io.on('connection', (socket) => {
     }
     room.teamSubs[socket.id] = resolved;
     socket.emit('teamAccepted', { display: resolved.display });
+
+    // Start pulling this club's squad now, while the other player is still
+    // typing — by the reveal it is usually already cached.
+    prefetchSquad(resolved);
 
     const ids = room.players.map((p) => p.socketId);
     io.to(room.id).emit('opponentTeamStatus', {

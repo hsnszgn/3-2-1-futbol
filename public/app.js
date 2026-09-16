@@ -142,6 +142,7 @@ function hideAllPhases() {
 }
 
 socket.on('roundStart', ({ round, maxRounds: mr, scores }) => {
+  clearPendingTeam();
   maxRounds = mr;
   currentRound = round;
   roundLabel.textContent = `Round ${round}/${maxRounds}`;
@@ -215,13 +216,32 @@ function scrollButtonIntoView(btn) {
   }, 300);
 }
 
+let pendingTeamTimer = null;
+
+function clearPendingTeam() {
+  if (pendingTeamTimer) {
+    clearTimeout(pendingTeamTimer);
+    pendingTeamTimer = null;
+  }
+}
+
 function submitTeam() {
   const val = teamInput.value.trim();
   if (!val || teamInput.disabled) return;
   socket.emit('submitTeam', { team: val });
+
+  // An unknown club is looked up live, which takes a moment — say so rather
+  // than leaving the button looking dead.
+  teamFeedback.textContent = 'Kontrol ediliyor...';
+  teamFeedback.className = 'feedback';
+  clearPendingTeam();
+  pendingTeamTimer = setTimeout(() => {
+    teamFeedback.textContent = 'Takım aranıyor, bekle...';
+  }, 2000);
 }
 
 socket.on('teamAccepted', ({ display }) => {
+  clearPendingTeam();
   teamInput.disabled = true;
   btnSubmitTeam.disabled = true;
   teamLockedName.textContent = display;
@@ -232,6 +252,7 @@ socket.on('teamAccepted', ({ display }) => {
 });
 
 socket.on('teamRejected', () => {
+  clearPendingTeam();
   teamFeedback.textContent = 'Tanınmayan takım adı, tekrar dene.';
   teamFeedback.className = 'feedback error';
 });

@@ -25,13 +25,14 @@ const LOOKUP_BUDGET_MS = 14000;
 const SEARCH_TIMEOUT_MS = 5000;
 const SPARQL_TIMEOUT_MS = 9000;
 const TEAM_TTL_MS = 24 * 60 * 60 * 1000;
-const PLAYERS_TTL_MS = 60 * 60 * 1000;
 const USER_AGENT = '3-2-1-Futbol/1.0 (https://github.com/hsnszgn/3-2-1-futbol)';
 
 const TEAM_RESOLVE_BUDGET_MS = 6000;
 
+const SQUAD_TTL_MS = 6 * 60 * 60 * 1000; // a club's historical squad barely moves
+
 const teamCandidateCache = new Map(); // display name -> { candidates, expiresAt }
-const commonPlayersCache = new Map(); // candidate-qid key -> { players, expiresAt }
+const squadCache = new Map(); // club candidate-qid key -> { qids, expiresAt }
 const freeTextTeamCache = new Map(); // typed name -> { team, expiresAt }
 
 async function fetchJson(url, timeoutMs) {
@@ -110,7 +111,7 @@ async function resolveTeamCandidates(displayName, deadline, seedQid) {
   // search results. Sorting club-looking hits to the front means the club
   // survives the cap below even when it ranks low.
   const ranked = [...matching.filter(isClubby), ...matching.filter((r) => !isClubby(r))]
-    .slice(0, 20)
+    .slice(0, 8) // a small VALUES list keeps the query cheap enough to survive
     .map((r) => ({ qid: r.id, label: r.label, description: r.description || '' }));
 
   // When the name was resolved live (a club outside the local list, or typed
@@ -155,33 +156,53 @@ async function resolveTeamByName(rawName) {
   return team;
 }
 
-async function fetchCommonPlayers(qidsA, qidsB, deadline) {
-  const key = `${[...qidsA].sort().join(',')}|${[...qidsB].sort().join(',')}`;
-  const cached = commonPlayersCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.players;
+/**
+ * Every player who has ever been a member of one club (all of that club's
+ * candidate items), as bare QIDs.
+ *
+ * Deliberately one club per query and no labels: asking for both clubs at
+ * once meant joining two property paths across two VALUES blocks, which is
+ * expensive enough that the public query service times it out. One club is a
+ * plain scan. It also caches per club, so a popular club is fetched once and
+ * every later matchup involving it is free.
+ *
+ * p:P54/ps:P54 rather than wdt:P54 is what makes recent transfers work: wdt:
+ * only exposes best-ranked statements, so once an editor marks a player's
+ * current club as preferred, every earlier club disappears from it.
+ */
+async function fetchSquadQids(qids, deadline) {
+  const key = [...qids].sort().join(',');
+  const cached = squadCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.qids;
 
-  const valuesA = qidsA.map((q) => `wd:${q}`).join(' ');
-  const valuesB = qidsB.map((q) => `wd:${q}`).join(' ');
-  // p:P54/ps:P54 rather than wdt:P54, and this is the whole ballgame for
-  // recent transfers: wdt: only exposes "truthy" statements, so as soon as an
-  // editor marks a player's current club as preferred rank, every previous
-  // club disappears from wdt: — a player who just moved looks like he has
-  // only ever played for one team. Going through the statement node returns
-  // the full career regardless of rank.
-  //
-  // No occupation filter either: plenty of real players lack the occupation
-  // claim, and membership of both clubs is already the question being asked.
-  // The label service supplies a name (falling back across languages) plus
-  // alternate spellings, so nobody is dropped for missing an English label.
+  const values = qids.map((q) => `wd:${q}`).join(' ');
   const query = `
-    SELECT DISTINCT ?player ?playerLabel ?playerAltLabel WHERE {
-      VALUES ?teamA { ${valuesA} }
-      VALUES ?teamB { ${valuesB} }
-      ?player p:P54/ps:P54 ?teamA .
-      ?player p:P54/ps:P54 ?teamB .
+    SELECT DISTINCT ?player WHERE {
+      VALUES ?team { ${values} }
+      ?player p:P54/ps:P54 ?team .
+    }
+    LIMIT 5000
+  `;
+  const url = `${SPARQL_ENDPOINT}?format=json&query=${encodeURIComponent(query)}`;
+  const data = await fetchJsonWithRetry(url, SPARQL_TIMEOUT_MS, deadline);
+  const rows = data && data.results && Array.isArray(data.results.bindings) ? data.results.bindings : [];
+  const playerQids = rows.map((r) => r.player && r.player.value).filter(Boolean);
+
+  squadCache.set(key, { qids: playerQids, expiresAt: Date.now() + SQUAD_TTL_MS });
+  return playerQids;
+}
+
+const qidOf = (uri) => uri.slice(uri.lastIndexOf('/') + 1);
+
+/** Names + alternate spellings for the (usually short) intersection. */
+async function fetchPlayerNames(playerUris, deadline) {
+  if (!playerUris.length) return [];
+  const values = playerUris.slice(0, 250).map((uri) => `wd:${qidOf(uri)}`).join(' ');
+  const query = `
+    SELECT ?player ?playerLabel ?playerAltLabel WHERE {
+      VALUES ?player { ${values} }
       SERVICE wikibase:label { bd:serviceParam wikibase:language "en,tr,es,it,de,fr". }
     }
-    LIMIT 3000
   `;
   const url = `${SPARQL_ENDPOINT}?format=json&query=${encodeURIComponent(query)}`;
   const data = await fetchJsonWithRetry(url, SPARQL_TIMEOUT_MS, deadline);
@@ -189,19 +210,28 @@ async function fetchCommonPlayers(qidsA, qidsB, deadline) {
 
   const byQid = new Map();
   for (const row of rows) {
-    const qid = row.player && row.player.value;
+    const uri = row.player && row.player.value;
     const label = row.playerLabel && row.playerLabel.value;
-    if (!qid || !label) continue;
+    if (!uri || !label) continue;
     // The label service returns altLabels as one comma-separated string.
     const aliases = row.playerAltLabel && row.playerAltLabel.value
       ? row.playerAltLabel.value.split(',').map((s) => s.trim()).filter(Boolean)
       : [];
-    if (!byQid.has(qid)) byQid.set(qid, { name: label, aliases });
+    if (!byQid.has(uri)) byQid.set(uri, { name: label, aliases });
   }
-  const players = [...byQid.values()];
+  return [...byQid.values()];
+}
 
-  commonPlayersCache.set(key, { players, expiresAt: Date.now() + PLAYERS_TTL_MS });
-  return players;
+/** Warms one club's squad cache, so the reveal doesn't have to wait for it. */
+async function prefetchSquad(team) {
+  try {
+    const deadline = Date.now() + LOOKUP_BUDGET_MS;
+    const candidates = await resolveTeamCandidates(team.display, deadline, team.qid);
+    if (!candidates.length) return;
+    await fetchSquadQids(candidates.map((c) => c.qid), deadline);
+  } catch (err) {
+    // Best effort only — the real lookup will report any failure.
+  }
 }
 
 /**
@@ -224,11 +254,19 @@ async function getCommonPlayers(teamA, teamB) {
       return { ok: false, reason: 'team_not_found', debug };
     }
 
-    const players = await fetchCommonPlayers(
-      candA.map((c) => c.qid),
-      candB.map((c) => c.qid),
-      deadline,
-    );
+    // Fetch each squad separately (cheap, cacheable per club) and intersect
+    // here rather than making the query service do the join.
+    const [squadA, squadB] = await Promise.all([
+      fetchSquadQids(candA.map((c) => c.qid), deadline),
+      fetchSquadQids(candB.map((c) => c.qid), deadline),
+    ]);
+    debug.squadSizes = { a: squadA.length, b: squadB.length };
+
+    const inB = new Set(squadB);
+    const shared = squadA.filter((uri) => inB.has(uri));
+    debug.commonCount = shared.length;
+
+    const players = await fetchPlayerNames(shared, deadline);
     debug.playerCount = players.length;
     debug.elapsedMs = Date.now() - startedAt;
     return { ok: true, players, debug };
@@ -239,4 +277,4 @@ async function getCommonPlayers(teamA, teamB) {
   }
 }
 
-module.exports = { getCommonPlayers, resolveTeamByName };
+module.exports = { getCommonPlayers, resolveTeamByName, prefetchSquad };
