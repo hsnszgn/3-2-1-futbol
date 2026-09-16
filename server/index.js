@@ -18,6 +18,36 @@ const RECONNECT_GRACE_MS = 12000;
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Diagnostics for the Wikidata lookup, e.g.
+//   /debug/lookup?a=Inter Milan&b=AC Milan
+//   /debug/lookup?a=Fenerbahce&b=Lazio&guess=Vedat Muriqi
+// Shows which Wikidata items each club name resolved to and what the common
+// player list actually contains, so a "that player should have counted" report
+// can be checked against real data instead of guessed at.
+app.get('/debug/lookup', async (req, res) => {
+  const teamA = resolveTeam(req.query.a);
+  const teamB = resolveTeam(req.query.b);
+  if (!teamA || !teamB) {
+    res.status(400).json({
+      error: 'unknown_team_name',
+      resolvedA: teamA ? teamA.display : null,
+      resolvedB: teamB ? teamB.display : null,
+    });
+    return;
+  }
+
+  const lookup = await getCommonPlayers(teamA.display, teamB.display);
+  const guess = req.query.guess;
+  res.json({
+    ok: lookup.ok,
+    reason: lookup.reason,
+    debug: lookup.debug,
+    guess: guess || undefined,
+    guessMatched: guess && lookup.ok ? matchPlayerName(guess, lookup.players) : undefined,
+    players: lookup.ok ? lookup.players.map((p) => p.name) : undefined,
+  });
+});
+
 const server = http.createServer(app);
 // Mobile connections drop and reconnect constantly (keyboard focus changes,
 // backgrounding the tab, brief network blips). Without this, a reconnect gets

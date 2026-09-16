@@ -20,10 +20,23 @@ Sunucu `http://localhost:3000` adresinde çalışır.
 
 ## Mimari
 - `server/index.js` — Express + Socket.io: eşleştirme (rastgele kuyruk / oda kodu), round state machine, zamanlayıcılar, bağlantı kopması toleransı.
-- `server/wikidata.js` — Futbolcu doğrulaması için Wikidata'nın ücretsiz, API-key gerektirmeyen SPARQL + arama servislerine canlı bağlanır: takım adını Wikidata QID'ine çözer (kalıcı önbellek), sonra o iki takımda ortak oynamış tüm futbolcuları tek SPARQL sorgusuyla çeker (1 saatlik önbellek). Bu sorgu, takımlar açıklanır açıklanmaz (oyuncular henüz yazmaya başlamadan) arka planda tetiklenir, böylece gerçek tahmin anında gecikme neredeyse hiç hissedilmez.
-- `server/gameLogic.js` — Önceden çekilmiş oyuncu listesine karşı normalize + basit fuzzy (Levenshtein) eşleştirme.
+- `server/wikidata.js` — Futbolcu doğrulaması için Wikidata'nın ücretsiz, API-key gerektirmeyen arama + SPARQL servislerine canlı bağlanır. Önemli ayrıntı: Wikidata'da birçok kulübün birden fazla kaydı vardır (ana spor kulübü, futbol şubesi, tarihî isimler) ve futbolcuların "member of sports team" (P54) kayıtları bunlardan yalnızca birine bağlıdır; bu yüzden tek bir kayıt seçmek yerine isme gerçekten benzeyen tüm adaylar `VALUES` ile sorguda birleştirilir. Sorgu, takımlar açıklanır açıklanmaz (oyuncular henüz yazmaya başlamadan) arka planda tetiklenir, böylece tahmin anında gecikme hissedilmez.
+- `server/gameLogic.js` — Önceden çekilmiş oyuncu listesine karşı eşleştirme: normalize (Türkçe karakter dahil), Wikidata takma adları, yazım hatası toleransı (Levenshtein) ve sadece soyisim yazma ("Muriqi") desteği.
 - `server/data/teams.js` — Takım adı/alias normalizasyonu (Türkçe karakter desteği dahil) — kullanıcının yazdığı serbest metni kanonik bir takım adına çevirir, Wikidata sorgusu bu adla yapılır.
 - `public/` — Tek sayfalık istemci (vanilla JS + Socket.io client).
+
+## Teşhis (bir oyuncu/takım neden kabul edilmedi?)
+
+Canlı sunucuda şu adresi tarayıcıda açarak Wikidata'nın o eşleşme için ne
+döndürdüğünü ham haliyle görebilirsin:
+
+```
+/debug/lookup?a=Fenerbahce&b=Lazio&guess=Vedat Muriqi
+```
+
+Yanıt; her iki takım adının Wikidata'da hangi kayıtlara çözüldüğünü
+(`candidatesA`/`candidatesB`), ortak oyuncu sayısını, tüm ortak oyuncu
+listesini ve yazılan ismin eşleşip eşleşmediğini (`guessMatched`) gösterir.
 
 ## Veri kaynağı ve bilinen sınırlamalar
 - Futbolcu-takım verisi elle küratörlenmiş bir liste DEĞİL — her sorguda canlı olarak Wikidata'dan çekiliyor, bu yüzden kapsam pratikte Wikidata'nın kapsamı kadar geniş (dünyadaki hemen her profesyonel futbolcu).
