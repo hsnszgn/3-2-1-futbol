@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>3-2-1 Futbol</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- LOBBY -->
+    <section id="screen-lobby" class="screen active">
+      <h1 class="logo">3<span>-</span>2<span>-</span>1<br>FUTBOL</h1>
+      <p class="tagline">Aynı anda takım söyle, ortak oyuncuyu ilk sen bul.</p>
+
+      <input id="nameInput" class="text-input" type="text" placeholder="Adını yaz" maxlength="24" autocomplete="off">
+
+      <div class="lobby-actions">
+        <button id="btnQuickMatch" class="btn btn-primary">Rastgele Rakip Bul</button>
+        <div class="divider">veya</div>
+        <button id="btnCreateRoom" class="btn btn-secondary">Arkadaşına Kod Oluştur</button>
+        <div class="join-row">
+          <input id="codeInput" class="text-input code-input" type="text" placeholder="ODA KODU" maxlength="6" autocomplete="off">
+          <button id="btnJoinRoom" class="btn btn-secondary">Katıl</button>
+        </div>
+      </div>
+
+      <p id="lobbyStatus" class="status-line"></p>
+    </section>
+
+    <!-- WAITING -->
+    <section id="screen-waiting" class="screen">
+      <div class="spinner"></div>
+      <p id="waitingText">Rakip aranıyor...</p>
+      <p id="roomCodeDisplay" class="room-code-display"></p>
+      <button id="btnCancelWait" class="btn btn-text">İptal</button>
+    </section>
+
+    <!-- GAME -->
+    <section id="screen-game" class="screen">
+      <div class="hud">
+        <div class="hud-player me">
+          <span class="hud-name" id="myName">Sen</span>
+          <span class="hud-score" id="myScore">0</span>
+        </div>
+        <div class="hud-round" id="roundLabel">Round 1/5</div>
+        <div class="hud-player opp">
+          <span class="hud-score" id="oppScore">0</span>
+          <span class="hud-name" id="oppName">Rakip</span>
+        </div>
+      </div>
+
+      <div class="game-stage">
+        <div id="countdownDisplay" class="countdown"></div>
+
+        <div id="teamPhase" class="phase hidden">
+          <p class="phase-title">Bir takım söyle!</p>
+          <input id="teamInput" class="text-input big" type="text" placeholder="Örn: Real Madrid" autocomplete="off">
+          <p id="teamFeedback" class="feedback"></p>
+          <div class="opponent-status" id="teamOppStatus"></div>
+        </div>
+
+        <div id="revealPhase" class="phase hidden">
+          <div class="team-cards">
+            <div class="team-card mine">
+              <span class="tc-label">SEN</span>
+              <span class="tc-team" id="revealMyTeam"></span>
+            </div>
+            <div class="vs">VS</div>
+            <div class="team-card theirs">
+              <span class="tc-label" id="revealOppLabel">RAKİP</span>
+              <span class="tc-team" id="revealOppTeam"></span>
+            </div>
+          </div>
+        </div>
+
+        <div id="guessPhase" class="phase hidden">
+          <p class="phase-title">Her iki takımda da oynamış bir futbolcu yaz!</p>
+          <input id="guessInput" class="text-input big" type="text" placeholder="Futbolcu adı..." autocomplete="off">
+          <p id="guessFeedback" class="feedback"></p>
+          <div class="timer-bar-wrap"><div id="timerBar" class="timer-bar"></div></div>
+        </div>
+
+        <div id="resultPhase" class="phase hidden">
+          <p id="resultText" class="result-text"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- GAME OVER -->
+    <section id="screen-over" class="screen">
+      <h2 id="overTitle">Oyun Bitti</h2>
+      <p id="overScore" class="over-score"></p>
+      <button id="btnRematch" class="btn btn-primary">Yeni Oyun</button>
+    </section>
+
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
