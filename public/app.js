@@ -281,6 +281,28 @@ socket.on('opponentLeft', () => {
   lobbyStatus.textContent = 'Rakip bağlantıyı kopardı.';
 });
 
+let connectionNotice = null;
+socket.on('opponentDisconnectedTemporarily', () => {
+  connectionNotice = teamFeedback.textContent || guessFeedback.textContent;
+  teamFeedback.textContent = 'Rakibin bağlantısı geçici olarak koptu, bekleniyor...';
+  teamFeedback.className = 'feedback error';
+  guessFeedback.textContent = 'Rakibin bağlantısı geçici olarak koptu, bekleniyor...';
+  guessFeedback.className = 'feedback error';
+});
+socket.on('opponentReconnected', () => {
+  teamFeedback.textContent = connectionNotice || '';
+  guessFeedback.textContent = connectionNotice || '';
+});
+
+socket.io.on('reconnect', () => {
+  // Our own connection dropped and came back — re-announce identity/room
+  // membership isn't needed (connection state recovery restores it
+  // server-side), but let the player know play can continue.
+  if (screens.game.classList.contains('active')) {
+    lobbyStatus.textContent = '';
+  }
+});
+
 document.getElementById('btnRematch').addEventListener('click', () => {
   showScreen('lobby');
   lobbyStatus.textContent = '';

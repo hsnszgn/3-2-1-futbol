@@ -12,12 +12,24 @@ const MAX_ROUNDS = 5;
 const TEAM_SUBMIT_MS = 12000;
 const PLAYER_GUESS_MS = 25000;
 const NEXT_ROUND_DELAY_MS = 3500;
+const RECONNECT_GRACE_MS = 12000;
 
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 const server = http.createServer(app);
-const io = new Server(server);
+// Mobile connections drop and reconnect constantly (keyboard focus changes,
+// backgrounding the tab, brief network blips). Without this, a reconnect gets
+// a fresh socket.id/data, the server can no longer find the player's room,
+// and every subsequent submitTeam/submitGuess silently no-ops. This restores
+// the socket's id, rooms, and `data` (roomId, name) transparently on any
+// reconnect within the window, so gameplay just continues.
+const io = new Server(server, {
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true,
+  },
+});
 
 /** @type {Map<string, {id: string, players: Object[], round: number, scores: Object, state: string, teamSubs: Object, timer: any}>} */
 const rooms = new Map();
@@ -169,8 +181,27 @@ function endGame(room) {
 }
 
 io.on('connection', (socket) => {
-  socket.data.name = null;
-  socket.data.roomId = null;
+  // A recovered connection (Socket.IO connection state recovery) already has
+  // its previous socket.data (roomId, name) restored — don't wipe it.
+  if (!socket.recovered) {
+    socket.data.name = null;
+    socket.data.roomId = null;
+  }
+
+  if (socket.recovered && socket.data.roomId) {
+    const room = rooms.get(socket.data.roomId);
+    if (room) {
+      if (room.cleanupTimer) {
+        clearTimeout(room.cleanupTimer);
+        room.cleanupTimer = null;
+      }
+      socket.join(room.id);
+      socket.to(room.id).emit('opponentReconnected');
+    } else {
+      // Room was already torn down before this socket made it back.
+      socket.data.roomId = null;
+    }
+  }
 
   socket.on('joinQueue', ({ name }) => {
     const safeName = (name || '').toString().trim().slice(0, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
@@ -278,7 +309,26 @@ io.on('connection', (socket) => {
     const idx = queue.findIndex((s) => s.id === socket.id);
     if (idx !== -1) queue.splice(idx, 1);
     if (socket.data.pendingCode) codeRooms.delete(socket.data.pendingCode);
-    cleanupSocket(socket, true);
+
+    const roomId = socket.data.roomId;
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    // Don't tear the room down immediately: mobile sockets drop and come
+    // back constantly (keyboard focus, backgrounding, brief network blips).
+    // Give connection state recovery a window to bring the same socket back
+    // into this room before we tell the opponent they left for good.
+    socket.to(roomId).emit('opponentDisconnectedTemporarily');
+    if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
+    room.cleanupTimer = setTimeout(() => {
+      room.cleanupTimer = null;
+      const current = rooms.get(roomId);
+      if (!current) return;
+      clearTimer(current);
+      io.to(roomId).emit('opponentLeft', { disconnected: true });
+      rooms.delete(roomId);
+    }, RECONNECT_GRACE_MS);
   });
 });
 
@@ -287,6 +337,7 @@ function cleanupSocket(socket, disconnected = false) {
   if (!roomId) return;
   const room = rooms.get(roomId);
   if (!room) return;
+  if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
   clearTimer(room);
   socket.to(roomId).emit('opponentLeft', { disconnected });
   rooms.delete(roomId);
