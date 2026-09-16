@@ -97,18 +97,24 @@ async function fetchCommonPlayers(qidsA, qidsB) {
 
   const valuesA = qidsA.map((q) => `wd:${q}`).join(' ');
   const valuesB = qidsB.map((q) => `wd:${q}`).join(' ');
-  // No occupation filter: plenty of real players lack the occupation claim, and
-  // P54 membership of both clubs is already the thing being asked about.
-  // altLabels come along so alternate spellings of a name also match.
+  // p:P54/ps:P54 rather than wdt:P54, and this is the whole ballgame for
+  // recent transfers: wdt: only exposes "truthy" statements, so as soon as an
+  // editor marks a player's current club as preferred rank, every previous
+  // club disappears from wdt: — a player who just moved looks like he has
+  // only ever played for one team. Going through the statement node returns
+  // the full career regardless of rank.
+  //
+  // No occupation filter either: plenty of real players lack the occupation
+  // claim, and membership of both clubs is already the question being asked.
+  // The label service supplies a name (falling back across languages) plus
+  // alternate spellings, so nobody is dropped for missing an English label.
   const query = `
-    SELECT DISTINCT ?player ?playerLabel ?alt WHERE {
+    SELECT DISTINCT ?player ?playerLabel ?playerAltLabel WHERE {
       VALUES ?teamA { ${valuesA} }
       VALUES ?teamB { ${valuesB} }
-      ?player wdt:P54 ?teamA .
-      ?player wdt:P54 ?teamB .
-      ?player rdfs:label ?playerLabel .
-      FILTER(LANG(?playerLabel) = "en")
-      OPTIONAL { ?player skos:altLabel ?alt . FILTER(LANG(?alt) IN ("en", "tr")) }
+      ?player p:P54/ps:P54 ?teamA .
+      ?player p:P54/ps:P54 ?teamB .
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en,tr,es,it,de,fr". }
     }
     LIMIT 3000
   `;
@@ -116,14 +122,16 @@ async function fetchCommonPlayers(qidsA, qidsB) {
   const data = await fetchJsonWithRetry(url, SPARQL_TIMEOUT_MS);
   const rows = data && data.results && Array.isArray(data.results.bindings) ? data.results.bindings : [];
 
-  // Collapse the label/altLabel rows into one entry per player.
   const byQid = new Map();
   for (const row of rows) {
     const qid = row.player && row.player.value;
     const label = row.playerLabel && row.playerLabel.value;
     if (!qid || !label) continue;
-    if (!byQid.has(qid)) byQid.set(qid, { name: label, aliases: [] });
-    if (row.alt && row.alt.value) byQid.get(qid).aliases.push(row.alt.value);
+    // The label service returns altLabels as one comma-separated string.
+    const aliases = row.playerAltLabel && row.playerAltLabel.value
+      ? row.playerAltLabel.value.split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+    if (!byQid.has(qid)) byQid.set(qid, { name: label, aliases });
   }
   const players = [...byQid.values()];
 
