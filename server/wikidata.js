@@ -28,8 +28,11 @@ const TEAM_TTL_MS = 24 * 60 * 60 * 1000;
 const PLAYERS_TTL_MS = 60 * 60 * 1000;
 const USER_AGENT = '3-2-1-Futbol/1.0 (https://github.com/hsnszgn/3-2-1-futbol)';
 
+const TEAM_RESOLVE_BUDGET_MS = 6000;
+
 const teamCandidateCache = new Map(); // display name -> { candidates, expiresAt }
 const commonPlayersCache = new Map(); // candidate-qid key -> { players, expiresAt }
+const freeTextTeamCache = new Map(); // typed name -> { team, expiresAt }
 
 async function fetchJson(url, timeoutMs) {
   const controller = new AbortController();
@@ -74,16 +77,30 @@ function labelLooksLikeTeam(label, searchTerm) {
   return a.includes(b) || b.includes(a);
 }
 
-const CLUBBY = /football|soccer|\bf\.?c\.?\b|\bc\.?f\.?\b|\ba\.?c\.?\b|\bs\.?k\.?\b|sports club|sport(s)? team/i;
+// Descriptions come back in whatever language was searched, so this has to
+// recognise a club in Turkish ("futbol kulübü") as well as English —
+// otherwise every Turkish-language hit gets filtered out as "not a club".
+const CLUBBY = new RegExp([
+  'football', 'soccer', 'futbol', 'fútbol', 'futebol', 'calcio', 'calcistic',
+  'fussball', 'fußball', 'voetbal', 'kulüb', 'kulub', 'sports? club',
+  'sport(s)? team', 'verein', '\\bf\\.?c\\.?\\b', '\\bc\\.?f\\.?\\b',
+  '\\ba\\.?c\\.?\\b', '\\bs\\.?k\\.?\\b',
+].join('|'), 'i');
+const isClubby = (r) => CLUBBY.test(r.description || '') || CLUBBY.test(r.label || '');
 
-async function resolveTeamCandidates(displayName, deadline) {
-  const cached = teamCandidateCache.get(displayName);
+async function searchItems(term, language, deadline) {
+  const url = `${SEARCH_ENDPOINT}?action=wbsearchentities&search=${encodeURIComponent(term)}`
+    + `&language=${language}&uselang=${language}&type=item&format=json&limit=50`;
+  const data = await fetchJsonWithRetry(url, SEARCH_TIMEOUT_MS, deadline);
+  return data && Array.isArray(data.search) ? data.search : [];
+}
+
+async function resolveTeamCandidates(displayName, deadline, seedQid) {
+  const cacheKey = seedQid ? `${displayName}|${seedQid}` : displayName;
+  const cached = teamCandidateCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.candidates;
 
-  const url = `${SEARCH_ENDPOINT}?action=wbsearchentities&search=${encodeURIComponent(displayName)}`
-    + '&language=en&uselang=en&type=item&format=json&limit=50';
-  const data = await fetchJsonWithRetry(url, SEARCH_TIMEOUT_MS, deadline);
-  const results = data && Array.isArray(data.search) ? data.search : [];
+  const results = await searchItems(displayName, 'en', deadline);
 
   const matching = results.filter((r) => labelLooksLikeTeam(r.label || '', displayName)
     || labelLooksLikeTeam(r.match && r.match.text ? r.match.text : '', displayName));
@@ -92,13 +109,50 @@ async function resolveTeamCandidates(displayName, deadline) {
   // province, a town in Venezuela...), and those can outrank the club in
   // search results. Sorting club-looking hits to the front means the club
   // survives the cap below even when it ranks low.
-  const clubby = (r) => CLUBBY.test(r.description || '') || CLUBBY.test(r.label || '');
-  const candidates = [...matching.filter(clubby), ...matching.filter((r) => !clubby(r))]
+  const ranked = [...matching.filter(isClubby), ...matching.filter((r) => !isClubby(r))]
     .slice(0, 20)
     .map((r) => ({ qid: r.id, label: r.label, description: r.description || '' }));
 
-  teamCandidateCache.set(displayName, { candidates, expiresAt: Date.now() + TEAM_TTL_MS });
+  // When the name was resolved live (a club outside the local list, or typed
+  // in Turkish), that exact item is the one the player meant — keep it at the
+  // front, and let the name search add the club's other items around it.
+  const candidates = seedQid && !ranked.some((c) => c.qid === seedQid)
+    ? [{ qid: seedQid, label: displayName, description: 'resolved from typed name' }, ...ranked]
+    : ranked;
+
+  teamCandidateCache.set(cacheKey, { candidates, expiresAt: Date.now() + TEAM_TTL_MS });
   return candidates;
+}
+
+/**
+ * Turns free text the player typed into a club, for anything the local alias
+ * list in data/teams.js doesn't cover — clubs nobody thought to add
+ * (Deportivo, Leganés) and Turkish exonyms ("Marsilya" for Marseille), which
+ * is why the Turkish search runs alongside the English one.
+ *
+ * @returns {Promise<{id: string, display: string, qid: string}|null>}
+ */
+async function resolveTeamByName(rawName) {
+  const key = normalize(rawName);
+  if (!key) return null;
+  const cached = freeTextTeamCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.team;
+
+  const deadline = Date.now() + TEAM_RESOLVE_BUDGET_MS;
+  let team = null;
+  try {
+    const [en, tr] = await Promise.all([
+      searchItems(rawName, 'en', deadline).catch(() => []),
+      searchItems(rawName, 'tr', deadline).catch(() => []),
+    ]);
+    const club = [...en, ...tr].find(isClubby);
+    if (club) team = { id: club.id, display: club.label, qid: club.id };
+  } catch (err) {
+    return null;
+  }
+
+  freeTextTeamCache.set(key, { team, expiresAt: Date.now() + TEAM_TTL_MS });
+  return team;
 }
 
 async function fetchCommonPlayers(qidsA, qidsB, deadline) {
@@ -154,14 +208,14 @@ async function fetchCommonPlayers(qidsA, qidsB, deadline) {
  * Resolves two team display names to the players who played for both.
  * Returns { ok: true, players: [{name, aliases}], debug } or { ok: false, reason, debug }.
  */
-async function getCommonPlayers(teamDisplayA, teamDisplayB) {
+async function getCommonPlayers(teamA, teamB) {
   const startedAt = Date.now();
   const deadline = startedAt + LOOKUP_BUDGET_MS;
-  const debug = { teamA: teamDisplayA, teamB: teamDisplayB };
+  const debug = { teamA: teamA.display, teamB: teamB.display };
   try {
     const [candA, candB] = await Promise.all([
-      resolveTeamCandidates(teamDisplayA, deadline),
-      resolveTeamCandidates(teamDisplayB, deadline),
+      resolveTeamCandidates(teamA.display, deadline, teamA.qid),
+      resolveTeamCandidates(teamB.display, deadline, teamB.qid),
     ]);
     debug.candidatesA = candA;
     debug.candidatesB = candB;
@@ -185,4 +239,4 @@ async function getCommonPlayers(teamDisplayA, teamDisplayB) {
   }
 }
 
-module.exports = { getCommonPlayers };
+module.exports = { getCommonPlayers, resolveTeamByName };

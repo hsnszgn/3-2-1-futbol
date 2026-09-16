@@ -4,9 +4,20 @@ const express = require('express');
 const { Server } = require('socket.io');
 const { randomUUID } = require('crypto');
 
-const { resolveTeam } = require('./data/teams');
+const { resolveTeam, normalize } = require('./data/teams');
 const { matchPlayerName } = require('./gameLogic');
-const { getCommonPlayers } = require('./wikidata');
+const { getCommonPlayers, resolveTeamByName } = require('./wikidata');
+
+// The local alias list handles the common cases instantly ("Man United",
+// "GS"); anything it doesn't know — a club nobody added, or a Turkish name
+// like "Marsilya" — is resolved live against Wikidata rather than rejected.
+async function resolveTeamInput(text) {
+  return resolveTeam(text) || resolveTeamByName(text);
+}
+
+function sameTeam(a, b) {
+  return a.id === b.id || normalize(a.display) === normalize(b.display);
+}
 
 const PORT = process.env.PORT || 3000;
 const MAX_ROUNDS = 5;
@@ -25,8 +36,10 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // player list actually contains, so a "that player should have counted" report
 // can be checked against real data instead of guessed at.
 app.get('/debug/lookup', async (req, res) => {
-  const teamA = resolveTeam(req.query.a);
-  const teamB = resolveTeam(req.query.b);
+  const [teamA, teamB] = await Promise.all([
+    resolveTeamInput(req.query.a),
+    resolveTeamInput(req.query.b),
+  ]);
   if (!teamA || !teamB) {
     res.status(400).json({
       error: 'unknown_team_name',
@@ -36,11 +49,12 @@ app.get('/debug/lookup', async (req, res) => {
     return;
   }
 
-  const lookup = await getCommonPlayers(teamA.display, teamB.display);
+  const lookup = await getCommonPlayers(teamA, teamB);
   const guess = req.query.guess;
   res.json({
     ok: lookup.ok,
     reason: lookup.reason,
+    resolvedTeams: { a: teamA, b: teamB },
     debug: lookup.debug,
     guess: guess || undefined,
     guessMatched: guess && lookup.ok ? matchPlayerName(guess, lookup.players) : undefined,
@@ -160,7 +174,7 @@ function resolveTeamsPhase(room) {
     return;
   }
 
-  if (subA.id === subB.id) {
+  if (sameTeam(subA, subB)) {
     io.to(room.id).emit('roundVoid', { reason: 'same_team' });
     room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
     return;
@@ -172,7 +186,7 @@ function resolveTeamsPhase(room) {
   // Kick off the Wikidata lookup immediately, in parallel with the client's
   // reveal animation and the players' typing — by the time anyone submits a
   // guess, this has usually already resolved and matching is instant.
-  room.commonPlayersPromise = getCommonPlayers(subA.display, subB.display);
+  room.commonPlayersPromise = getCommonPlayers(subA, subB);
   room.commonPlayersPromise.then((result) => {
     if (!result.ok) {
       io.to(room.id).emit('lookupIssue', { reason: result.reason });
@@ -296,11 +310,18 @@ io.on('connection', (socket) => {
     createRoom(hostSocket, socket);
   });
 
-  socket.on('submitTeam', ({ team }) => {
+  socket.on('submitTeam', async ({ team }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return; // already submitted
-    const resolved = resolveTeam(team);
+
+    const resolved = await resolveTeamInput(team);
+
+    // Resolving may have gone to the network — make sure the round is still
+    // waiting for this team before acting on the answer.
+    if (rooms.get(socket.data.roomId) !== room || room.state !== 'team-submit') return;
+    if (room.teamSubs[socket.id]) return;
+
     if (!resolved) {
       socket.emit('teamRejected', { reason: 'unknown_team' });
       return;
