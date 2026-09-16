@@ -223,12 +223,22 @@ function submitGuess() {
   socket.emit('submitGuess', { guess: val });
 }
 
+const GUESS_REJECT_MESSAGES = {
+  player_not_found: 'Bu isimde, iki takımda da oynamış bir futbolcu bulunamadı.',
+  no_common_team: 'Bu oyuncu bu iki takımda birlikte oynamamış.',
+  lookup_failed: 'Doğrulama servisine şu an ulaşılamıyor, birkaç saniye sonra tekrar dene.',
+  team_not_found: 'Bu takımlardan biri veri kaynağında bulunamadı.',
+};
+
 socket.on('guessRejected', ({ reason }) => {
-  guessFeedback.textContent = reason === 'player_not_found'
-    ? 'Bu isimde bir futbolcu bulunamadı.'
-    : 'Bu oyuncu bu iki takımda birlikte oynamamış.';
+  guessFeedback.textContent = GUESS_REJECT_MESSAGES[reason] || 'Geçersiz cevap, tekrar dene.';
   guessFeedback.className = 'feedback error';
   guessInput.value = '';
+});
+
+socket.on('lookupIssue', ({ reason }) => {
+  guessFeedback.textContent = GUESS_REJECT_MESSAGES[reason] || 'Doğrulama servisinde bir sorun oluştu.';
+  guessFeedback.className = 'feedback error';
 });
 
 socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {

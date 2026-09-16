@@ -22,7 +22,7 @@ const TEAMS = [
   { id: 'borussia dortmund', display: 'Borussia Dortmund', aliases: ['dortmund', 'bvb'] },
   { id: 'rb leipzig', display: 'RB Leipzig', aliases: ['leipzig'] },
   { id: 'bayer leverkusen', display: 'Bayer Leverkusen', aliases: ['leverkusen'] },
-  { id: 'paris saint-germain', display: 'Paris Saint-Germain', aliases: ['psg', 'paris sg'] },
+  { id: 'paris saint-germain', display: 'Paris Saint-Germain', aliases: ['psg', 'paris sg', 'paris st germain', 'paris saint germain'] },
   { id: 'marseille', display: 'Marseille', aliases: ['om'] },
   { id: 'monaco', display: 'Monaco', aliases: ['as monaco'] },
   { id: 'lyon', display: 'Lyon', aliases: ['ol'] },
@@ -136,6 +136,10 @@ function normalize(str) {
     .normalize('NFD')
     .replace(/[̀-ͯ]/g, '')
     .replace(/^fc |^fk /, '')
+    // Turn separators (hyphens, apostrophes, dots) into spaces before
+    // stripping everything else — otherwise "Saint-Germain" collapses into
+    // "saintgermain" and never matches someone typing "Saint Germain".
+    .replace(/[-'.]/g, ' ')
     .replace(/[^a-z0-9 ]/g, '')
     .replace(/\s+/g, ' ')
     .trim();

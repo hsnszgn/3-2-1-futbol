@@ -5,7 +5,8 @@ const { Server } = require('socket.io');
 const { randomUUID } = require('crypto');
 
 const { resolveTeam } = require('./data/teams');
-const { validateGuess } = require('./gameLogic');
+const { matchPlayerName } = require('./gameLogic');
+const { getCommonPlayers } = require('./wikidata');
 
 const PORT = process.env.PORT || 3000;
 const MAX_ROUNDS = 5;
@@ -137,6 +138,17 @@ function resolveTeamsPhase(room) {
 
   room.state = 'player-submit';
   room.resolvedTeams = { [ids[0]]: subA, [ids[1]]: subB };
+
+  // Kick off the Wikidata lookup immediately, in parallel with the client's
+  // reveal animation and the players' typing — by the time anyone submits a
+  // guess, this has usually already resolved and matching is instant.
+  room.commonPlayersPromise = getCommonPlayers(subA.display, subB.display);
+  room.commonPlayersPromise.then((result) => {
+    if (!result.ok) {
+      io.to(room.id).emit('lookupIssue', { reason: result.reason });
+    }
+  });
+
   io.to(room.id).emit('teamsRevealed', {
     teams: {
       [ids[0]]: { display: subA.display, name: room.players.find((p) => p.socketId === ids[0]).name },
@@ -272,17 +284,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('submitGuess', ({ guess }) => {
+  socket.on('submitGuess', async ({ guess }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'player-submit' || room.playerGuessResolved) return;
-    const ids = room.players.map((p) => p.socketId);
-    const otherId = ids.find((id) => id !== socket.id);
-    const teamMine = room.resolvedTeams[socket.id];
-    const teamOther = room.resolvedTeams[otherId];
+    if (!room.commonPlayersPromise) return;
 
-    const result = validateGuess(guess, teamMine.id, teamOther.id);
-    if (!result.ok) {
-      socket.emit('guessRejected', { reason: result.reason, guess });
+    const lookup = await room.commonPlayersPromise;
+
+    // Re-check everything after the await — the round may have ended, the
+    // opponent may have already won it, or the room may be gone entirely.
+    if (rooms.get(socket.data.roomId) !== room || room.state !== 'player-submit' || room.playerGuessResolved) {
+      return;
+    }
+
+    if (!lookup.ok) {
+      socket.emit('guessRejected', { reason: lookup.reason, guess });
+      return;
+    }
+
+    const matched = matchPlayerName(guess, lookup.players);
+    if (!matched) {
+      socket.emit('guessRejected', { reason: 'player_not_found', guess });
       return;
     }
 
@@ -292,7 +314,7 @@ io.on('connection', (socket) => {
 
     io.to(room.id).emit('roundResult', {
       winnerSocketId: socket.id,
-      playerName: result.playerName,
+      playerName: matched,
       scores: scoresForClient(room),
     });
 

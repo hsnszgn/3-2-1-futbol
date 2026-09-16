@@ -1,16 +1,4 @@
 const { normalize } = require('./data/teams');
-const { PLAYERS } = require('./data/players');
-
-// Build lookup: normalized player name -> { name, teams: Set<teamId> }
-const PLAYER_INDEX = new Map();
-for (const p of PLAYERS) {
-  const key = normalize(p.name);
-  if (!PLAYER_INDEX.has(key)) {
-    PLAYER_INDEX.set(key, { name: p.name, teams: new Set(p.teams) });
-  } else {
-    for (const t of p.teams) PLAYER_INDEX.get(key).teams.add(t);
-  }
-}
 
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
@@ -27,36 +15,36 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 
-function findPlayer(input) {
+/**
+ * Matches a free-text guess against a pre-fetched list of player names
+ * (already known to have played for both teams — see server/wikidata.js).
+ * Exact match on the normalized name first, then a small-typo fuzzy fallback.
+ */
+function matchPlayerName(input, candidateNames) {
   const norm = normalize(input);
   if (!norm) return null;
-  if (PLAYER_INDEX.has(norm)) return PLAYER_INDEX.get(norm);
-  // fuzzy fallback for small typos
-  let best = null;
+
+  let exact = null;
+  let bestFuzzy = null;
   let bestDist = Infinity;
-  for (const [key, val] of PLAYER_INDEX.entries()) {
+
+  for (const name of candidateNames) {
+    const key = normalize(name);
+    if (!key) continue;
+    if (key === norm) {
+      exact = name;
+      break;
+    }
     const maxLen = Math.max(key.length, norm.length);
     const threshold = maxLen <= 6 ? 1 : 2;
     const dist = levenshtein(key, norm);
     if (dist <= threshold && dist < bestDist) {
-      best = val;
+      bestFuzzy = name;
       bestDist = dist;
     }
   }
-  return best;
+
+  return exact || bestFuzzy;
 }
 
-/**
- * Validate a player-name guess against two resolved team ids.
- * Returns { ok: true, playerName } or { ok: false, reason }
- */
-function validateGuess(playerNameInput, teamIdA, teamIdB) {
-  const player = findPlayer(playerNameInput);
-  if (!player) return { ok: false, reason: 'player_not_found' };
-  if (player.teams.has(teamIdA) && player.teams.has(teamIdB)) {
-    return { ok: true, playerName: player.name };
-  }
-  return { ok: false, reason: 'no_common_team' };
-}
-
-module.exports = { validateGuess, findPlayer };
+module.exports = { matchPlayerName };
