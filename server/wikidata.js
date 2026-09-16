@@ -63,19 +63,27 @@ function labelLooksLikeTeam(label, searchTerm) {
   return a.includes(b) || b.includes(a);
 }
 
+const CLUBBY = /football|soccer|\bf\.?c\.?\b|\bc\.?f\.?\b|\ba\.?c\.?\b|\bs\.?k\.?\b|sports club|sport(s)? team/i;
+
 async function resolveTeamCandidates(displayName) {
   const cached = teamCandidateCache.get(displayName);
   if (cached && cached.expiresAt > Date.now()) return cached.candidates;
 
   const url = `${SEARCH_ENDPOINT}?action=wbsearchentities&search=${encodeURIComponent(displayName)}`
-    + '&language=en&uselang=en&type=item&format=json&limit=15';
+    + '&language=en&uselang=en&type=item&format=json&limit=50';
   const data = await fetchJsonWithRetry(url, SEARCH_TIMEOUT_MS);
   const results = data && Array.isArray(data.search) ? data.search : [];
 
-  const candidates = results
-    .filter((r) => labelLooksLikeTeam(r.label || '', displayName)
-      || labelLooksLikeTeam(r.match && r.match.text ? r.match.text : '', displayName))
-    .slice(0, 8)
+  const matching = results.filter((r) => labelLooksLikeTeam(r.label || '', displayName)
+    || labelLooksLikeTeam(r.match && r.match.text ? r.match.text : '', displayName));
+
+  // A club name is very often also a place name ("Valencia" is a city, a
+  // province, a town in Venezuela...), and those can outrank the club in
+  // search results. Sorting club-looking hits to the front means the club
+  // survives the cap below even when it ranks low.
+  const clubby = (r) => CLUBBY.test(r.description || '') || CLUBBY.test(r.label || '');
+  const candidates = [...matching.filter(clubby), ...matching.filter((r) => !clubby(r))]
+    .slice(0, 20)
     .map((r) => ({ qid: r.id, label: r.label, description: r.description || '' }));
 
   teamCandidateCache.set(displayName, { candidates, expiresAt: Date.now() + TEAM_TTL_MS });
