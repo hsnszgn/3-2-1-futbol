@@ -220,6 +220,8 @@ guessInput.addEventListener('focus', () => scrollButtonIntoView(btnSubmitGuess))
 function submitGuess() {
   const val = guessInput.value.trim();
   if (!val || guessInput.disabled) return;
+  guessFeedback.textContent = 'Kontrol ediliyor...';
+  guessFeedback.className = 'feedback';
   socket.emit('submitGuess', { guess: val });
 }
 
@@ -241,6 +243,15 @@ socket.on('lookupIssue', ({ reason }) => {
   guessFeedback.className = 'feedback error';
 });
 
+// The round was already won while this guess was on its way — the answer
+// wasn't wrong, the opponent was simply faster.
+socket.on('guessTooLate', () => {
+  guessFeedback.textContent = 'Rakip senden hızlı davrandı!';
+  guessFeedback.className = 'feedback error';
+  guessInput.disabled = true;
+  btnSubmitGuess.disabled = true;
+});
+
 socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
   clearInterval(guessTimerInterval);
   hideAllPhases();
@@ -248,8 +259,8 @@ socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
   updateScores(scores);
   const iWon = winnerSocketId === mySocketId;
   resultText.textContent = iWon
-    ? `Sen kazandın! (${playerName})`
-    : `${oppName} kazandı! (${playerName})`;
+    ? `Sen daha hızlıydın! (${playerName})`
+    : `${oppName} senden hızlı davrandı! Doğru cevap: ${playerName}`;
   resultText.style.color = iWon ? '#2ecc71' : '#e74c3c';
 });
 

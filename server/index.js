@@ -316,14 +316,22 @@ io.on('connection', (socket) => {
 
   socket.on('submitGuess', async ({ guess }) => {
     const room = rooms.get(socket.data.roomId);
-    if (!room || room.state !== 'player-submit' || room.playerGuessResolved) return;
+    if (!room || room.state !== 'player-submit') return;
+    // A correct answer the opponent beat you to isn't a wrong answer — say so,
+    // otherwise a perfectly good guess looks like it was silently rejected.
+    if (room.playerGuessResolved) {
+      socket.emit('guessTooLate');
+      return;
+    }
     if (!room.commonPlayersPromise) return;
 
     const lookup = await room.commonPlayersPromise;
 
     // Re-check everything after the await — the round may have ended, the
     // opponent may have already won it, or the room may be gone entirely.
-    if (rooms.get(socket.data.roomId) !== room || room.state !== 'player-submit' || room.playerGuessResolved) {
+    if (rooms.get(socket.data.roomId) !== room || room.state !== 'player-submit') return;
+    if (room.playerGuessResolved) {
+      socket.emit('guessTooLate');
       return;
     }
 
