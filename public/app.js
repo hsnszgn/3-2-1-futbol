@@ -84,10 +84,39 @@ let guessInput = document.getElementById('guessInput');
 let btnSubmitGuess = document.getElementById('btnSubmitGuess');
 let guessFeedback = document.getElementById('guessFeedback');
 let timerBar = document.getElementById('timerBar');
+let timerBarTeam = document.getElementById('timerBarTeam');
 let resultText = document.getElementById('resultText');
+let verdictBox = document.getElementById('verdictBox');
+let verdictMark = document.getElementById('verdictMark');
+let teamLockedName = document.getElementById('teamLockedName');
+let roundPips = document.getElementById('roundPips');
+let vignette = document.getElementById('vignette');
 let maxRounds = 5;
+let currentRound = 1;
 let opponentTeamCache = null;
 let guessTimerInterval = null;
+let teamTimerInterval = null;
+
+function buzz(ms) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
+function renderPips(round) {
+  if (roundPips.children.length !== maxRounds) {
+    roundPips.innerHTML = '';
+    for (let i = 0; i < maxRounds; i++) roundPips.appendChild(document.createElement('i'));
+  }
+  [...roundPips.children].forEach((pip, i) => {
+    pip.classList.toggle('current', i === round - 1 && !pip.classList.contains('won') && !pip.classList.contains('lost'));
+  });
+}
+
+function markPip(round, outcome) {
+  const pip = roundPips.children[round - 1];
+  if (!pip) return;
+  pip.classList.remove('current');
+  if (outcome) pip.classList.add(outcome);
+}
 
 socket.on('connect', () => {
   mySocketId = socket.id;
@@ -96,8 +125,12 @@ socket.on('connect', () => {
 socket.on('matched', ({ opponentName, maxRounds: mr }) => {
   oppName = opponentName;
   maxRounds = mr;
-  document.getElementById('myName').textContent = nameInput.value.trim() || 'Sen';
+  const myName = nameInput.value.trim() || 'Sen';
+  document.getElementById('myName').textContent = myName;
   document.getElementById('oppName').textContent = oppName;
+  document.getElementById('myAvatar').textContent = myName.charAt(0).toUpperCase();
+  document.getElementById('oppAvatar').textContent = (oppName || 'R').charAt(0).toUpperCase();
+  roundPips.innerHTML = '';
   showScreen('game');
 });
 
@@ -110,9 +143,12 @@ function hideAllPhases() {
 
 socket.on('roundStart', ({ round, maxRounds: mr, scores }) => {
   maxRounds = mr;
+  currentRound = round;
   roundLabel.textContent = `Round ${round}/${maxRounds}`;
+  renderPips(round);
   updateScores(scores);
   hideAllPhases();
+  teamPhase.classList.remove('locked');
   teamInput.value = '';
   guessInput.value = '';
   teamFeedback.textContent = '';
@@ -120,22 +156,50 @@ socket.on('roundStart', ({ round, maxRounds: mr, scores }) => {
   teamOppStatus.textContent = '';
   opponentTeamCache = null;
   clearInterval(guessTimerInterval);
+  clearInterval(teamTimerInterval);
+  vignette.classList.remove('active');
 });
 
 socket.on('countdown', ({ value }) => {
   hideAllPhases();
   countdownDisplay.classList.remove('hidden');
+  countdownDisplay.classList.toggle('go', value === 'GO');
   countdownDisplay.textContent = value;
+  // Restart the pop animation on every beat.
+  countdownDisplay.style.animation = 'none';
+  void countdownDisplay.offsetWidth;
+  countdownDisplay.style.animation = '';
+  buzz(value === 'GO' ? 25 : 12);
 });
 
-socket.on('openTeamSubmit', () => {
+socket.on('openTeamSubmit', ({ timeoutMs }) => {
   hideAllPhases();
-  teamPhase.classList.remove('hidden');
+  teamPhase.classList.remove('hidden', 'locked');
   teamInput.disabled = false;
   btnSubmitTeam.disabled = false;
   teamInput.value = '';
   teamInput.focus();
+  runTimer(timerBarTeam, timeoutMs, (id) => { teamTimerInterval = id; }, () => teamTimerInterval);
 });
+
+// Drains a timer bar and turns it red for the last quarter, so time pressure
+// reads as colour and motion rather than just a shrinking width.
+function runTimer(bar, timeoutMs, setId, getId, onLow) {
+  clearInterval(getId());
+  const start = Date.now();
+  bar.style.width = '100%';
+  bar.classList.remove('low');
+  const id = setInterval(() => {
+    const pct = Math.max(0, 100 - ((Date.now() - start) / timeoutMs) * 100);
+    bar.style.width = pct + '%';
+    if (pct <= 28) {
+      bar.classList.add('low');
+      if (onLow) onLow();
+    }
+    if (pct <= 0) clearInterval(getId());
+  }, 100);
+  setId(id);
+}
 
 document.getElementById('teamInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitTeam();
@@ -160,8 +224,11 @@ function submitTeam() {
 socket.on('teamAccepted', ({ display }) => {
   teamInput.disabled = true;
   btnSubmitTeam.disabled = true;
-  teamFeedback.textContent = `✓ ${display} gönderildi. Rakip bekleniyor...`;
-  teamFeedback.className = 'feedback ok';
+  teamLockedName.textContent = display;
+  teamPhase.classList.add('locked');
+  teamFeedback.textContent = '';
+  teamFeedback.className = 'feedback';
+  teamOppStatus.textContent = 'Rakip bekleniyor...';
 });
 
 socket.on('teamRejected', () => {
@@ -170,10 +237,12 @@ socket.on('teamRejected', () => {
 });
 
 socket.on('opponentTeamStatus', ({ submittedBy }) => {
-  if (submittedBy.length === 1) {
-    teamOppStatus.textContent = submittedBy[0] === mySocketId
-      ? 'Rakip henüz yazmadı...'
-      : 'Rakip yazdı, sıra sende!';
+  if (submittedBy.length !== 1) return;
+  if (submittedBy[0] === mySocketId) {
+    teamOppStatus.textContent = 'Rakip hâlâ yazıyor...';
+  } else {
+    teamOppStatus.textContent = `${oppName} hazır — sıra sende!`;
+    buzz(15);
   }
 });
 
@@ -188,6 +257,10 @@ socket.on('teamsRevealed', ({ teams, timeoutMs }) => {
   document.getElementById('revealOppTeam').textContent = oppTeam.display;
   document.getElementById('revealOppLabel').textContent = oppTeam.name.toUpperCase();
 
+  clearInterval(teamTimerInterval);
+  buzz(20);
+
+  // The pause on the reveal is the drama — don't rush past it.
   setTimeout(() => {
     hideAllPhases();
     guessPhase.classList.remove('hidden');
@@ -195,21 +268,15 @@ socket.on('teamsRevealed', ({ teams, timeoutMs }) => {
     btnSubmitGuess.disabled = false;
     guessInput.value = '';
     guessInput.focus();
-    startGuessTimer(timeoutMs);
+    runTimer(
+      timerBar,
+      timeoutMs,
+      (id) => { guessTimerInterval = id; },
+      () => guessTimerInterval,
+      () => vignette.classList.add('active'),
+    );
   }, 1600);
 });
-
-function startGuessTimer(timeoutMs) {
-  clearInterval(guessTimerInterval);
-  const start = Date.now();
-  timerBar.style.width = '100%';
-  guessTimerInterval = setInterval(() => {
-    const elapsed = Date.now() - start;
-    const pct = Math.max(0, 100 - (elapsed / timeoutMs) * 100);
-    timerBar.style.width = pct + '%';
-    if (elapsed >= timeoutMs) clearInterval(guessTimerInterval);
-  }, 100);
-}
 
 document.getElementById('guessInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitGuess();
@@ -274,28 +341,38 @@ socket.on('guessTooLate', () => {
 socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
   clearPendingGuess();
   clearInterval(guessTimerInterval);
+  vignette.classList.remove('active');
   hideAllPhases();
   resultPhase.classList.remove('hidden');
   updateScores(scores);
+
   const iWon = winnerSocketId === mySocketId;
+  verdictBox.className = `verdict ${iWon ? 'win' : 'lose'}`;
+  verdictMark.textContent = iWon ? '✓' : '✕';
   resultText.textContent = iWon
-    ? `Sen daha hızlıydın! (${playerName})`
-    : `${oppName} senden hızlı davrandı! Doğru cevap: ${playerName}`;
-  resultText.style.color = iWon ? '#2ecc71' : '#e74c3c';
+    ? `Sen daha hızlıydın!\n${playerName}`
+    : `${oppName} senden hızlı davrandı.\nDoğru cevap: ${playerName}`;
+  resultText.style.whiteSpace = 'pre-line';
+  markPip(currentRound, iWon ? 'won' : 'lost');
+  buzz(iWon ? [18, 60, 18] : 40);
 });
 
 socket.on('roundVoid', ({ reason }) => {
   clearPendingGuess();
   clearInterval(guessTimerInterval);
+  clearInterval(teamTimerInterval);
+  vignette.classList.remove('active');
   hideAllPhases();
   resultPhase.classList.remove('hidden');
   const messages = {
-    timeout_team: 'Süre doldu, takım yazılmadı. Round tekrarlanıyor.',
-    same_team: 'Aynı takımı yazdınız! Round tekrarlanıyor.',
-    timeout_guess: 'Kimse doğru oyuncuyu bulamadı. Round tekrarlanıyor.',
+    timeout_team: 'Süre doldu, takım yazılmadı.\nRound tekrarlanıyor.',
+    same_team: 'Aynı takımı yazdınız!\nRound tekrarlanıyor.',
+    timeout_guess: 'Kimse doğru oyuncuyu bulamadı.',
   };
+  verdictBox.className = 'verdict';
+  verdictMark.textContent = '–';
   resultText.textContent = messages[reason] || 'Round tekrarlanıyor.';
-  resultText.style.color = '#7a7a88';
+  resultText.style.whiteSpace = 'pre-line';
 });
 
 function updateScores(scores) {
@@ -310,12 +387,15 @@ socket.on('gameOver', ({ scores, winnerSocketId }) => {
   showScreen('over');
   const title = document.getElementById('overTitle');
   const overScore = document.getElementById('overScore');
+  const oppId = Object.keys(scores).find((id) => id !== mySocketId);
   if (!winnerSocketId) {
-    title.textContent = 'Berabere!';
+    title.textContent = 'Berabere';
   } else {
-    title.textContent = winnerSocketId === mySocketId ? 'Kazandın! 🏆' : `${oppName} Kazandı`;
+    title.textContent = winnerSocketId === mySocketId ? 'Kazandın' : `${oppName} Kazandı`;
   }
-  overScore.textContent = `${scores[mySocketId] ?? 0} - ${Object.values(scores).find((v, i) => Object.keys(scores)[i] !== mySocketId) ?? 0}`;
+  title.style.color = winnerSocketId === mySocketId ? '#2ecc71' : '';
+  overScore.textContent = `${scores[mySocketId] ?? 0} - ${(oppId && scores[oppId]) || 0}`;
+  buzz(winnerSocketId === mySocketId ? [20, 70, 20, 70, 30] : 45);
 });
 
 socket.on('opponentLeft', () => {

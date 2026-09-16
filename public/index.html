@@ -2,99 +2,136 @@
 <html lang="tr">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
 <title>3-2-1 Futbol</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div id="vignette" class="vignette"></div>
   <div id="app">
 
     <!-- LOBBY -->
     <section id="screen-lobby" class="screen active">
-      <h1 class="logo">3<span>-</span>2<span>-</span>1<br>FUTBOL</h1>
-      <p class="tagline">Aynı anda takım söyle, ortak oyuncuyu ilk sen bul.</p>
-
-      <input id="nameInput" class="text-input" type="text" placeholder="Adını yaz" maxlength="24" autocomplete="off">
-
-      <div class="lobby-actions">
-        <button id="btnQuickMatch" class="btn btn-primary">Rastgele Rakip Bul</button>
-        <div class="divider">veya</div>
-        <button id="btnCreateRoom" class="btn btn-secondary">Arkadaşına Kod Oluştur</button>
-        <div class="join-row">
-          <input id="codeInput" class="text-input code-input" type="text" placeholder="ODA KODU" maxlength="6" autocomplete="off">
-          <button id="btnJoinRoom" class="btn btn-secondary">Katıl</button>
-        </div>
+      <div class="lobby-top">
+        <h1 class="logo">3<span>·</span>2<span>·</span>1<em>FUTBOL</em></h1>
+        <p class="tagline">Aynı anda takım söyle.<br>Ortak oyuncuyu ilk sen bul.</p>
       </div>
 
-      <p id="lobbyStatus" class="status-line"></p>
+      <div class="lobby-actions">
+        <input id="nameInput" class="text-input" type="text" placeholder="Adını yaz" maxlength="24" autocomplete="off">
+        <button id="btnQuickMatch" class="btn btn-primary">Rastgele Rakip Bul</button>
+        <div class="divider"><span>veya</span></div>
+        <button id="btnCreateRoom" class="btn btn-ghost">Arkadaşına Kod Oluştur</button>
+        <div class="join-row">
+          <input id="codeInput" class="text-input code-input" type="text" placeholder="ODA KODU" maxlength="6" autocomplete="off">
+          <button id="btnJoinRoom" class="btn btn-ghost">Katıl</button>
+        </div>
+        <p id="lobbyStatus" class="status-line"></p>
+      </div>
     </section>
 
     <!-- WAITING -->
     <section id="screen-waiting" class="screen">
-      <div class="spinner"></div>
-      <p id="waitingText">Rakip aranıyor...</p>
-      <p id="roomCodeDisplay" class="room-code-display"></p>
+      <div class="waiting-box">
+        <div class="pulse-ring"><span class="pulse-dot"></span></div>
+        <p id="waitingText" class="waiting-text">Rakip aranıyor<span class="dots"><i>.</i><i>.</i><i>.</i></span></p>
+        <p id="roomCodeDisplay" class="room-code-display"></p>
+      </div>
       <button id="btnCancelWait" class="btn btn-text">İptal</button>
     </section>
 
     <!-- GAME -->
     <section id="screen-game" class="screen">
-      <div class="hud">
-        <div class="hud-player me">
-          <span class="hud-name" id="myName">Sen</span>
-          <span class="hud-score" id="myScore">0</span>
+      <header class="hud">
+        <div class="hud-side">
+          <span class="avatar avatar-me" id="myAvatar">S</span>
+          <span class="hud-meta">
+            <span class="hud-name" id="myName">Sen</span>
+            <span class="hud-score" id="myScore">0</span>
+          </span>
         </div>
-        <div class="hud-round" id="roundLabel">Round 1/5</div>
-        <div class="hud-player opp">
-          <span class="hud-score" id="oppScore">0</span>
-          <span class="hud-name" id="oppName">Rakip</span>
+
+        <div class="hud-center">
+          <div class="pips" id="roundPips"></div>
+          <div class="hud-round" id="roundLabel">Round 1/5</div>
         </div>
-      </div>
+
+        <div class="hud-side hud-side-right">
+          <span class="hud-meta">
+            <span class="hud-name" id="oppName">Rakip</span>
+            <span class="hud-score" id="oppScore">0</span>
+          </span>
+          <span class="avatar avatar-opp" id="oppAvatar">R</span>
+        </div>
+      </header>
 
       <div class="game-stage">
         <div id="countdownDisplay" class="countdown"></div>
 
+        <!-- TEAM ENTRY -->
         <div id="teamPhase" class="phase hidden">
-          <p class="phase-title">Bir takım söyle!</p>
-          <input id="teamInput" class="text-input big" type="text" placeholder="Örn: Real Madrid" autocomplete="off" enterkeyhint="send" inputmode="text">
-          <button id="btnSubmitTeam" class="btn btn-primary">Gönder</button>
+          <div class="phase-ask">
+            <p class="phase-title">Bir takım söyle!</p>
+            <input id="teamInput" class="text-input hero" type="text" placeholder="Örn: Real Madrid" autocomplete="off" enterkeyhint="send" inputmode="text">
+            <button id="btnSubmitTeam" class="btn btn-primary btn-block">Gönder</button>
+          </div>
+
+          <div class="phase-locked">
+            <span class="locked-label">Takımın kilitlendi</span>
+            <span class="locked-value" id="teamLockedName"></span>
+          </div>
+
           <p id="teamFeedback" class="feedback"></p>
           <div class="opponent-status" id="teamOppStatus"></div>
+          <div class="timer-bar-wrap"><div id="timerBarTeam" class="timer-bar"></div></div>
         </div>
 
+        <!-- REVEAL -->
         <div id="revealPhase" class="phase hidden">
-          <div class="team-cards">
-            <div class="team-card mine">
-              <span class="tc-label">SEN</span>
-              <span class="tc-team" id="revealMyTeam"></span>
+          <div class="versus">
+            <div class="vs-panel vs-mine">
+              <span class="vs-label">SEN</span>
+              <span class="vs-team" id="revealMyTeam"></span>
             </div>
-            <div class="vs">VS</div>
-            <div class="team-card theirs">
-              <span class="tc-label" id="revealOppLabel">RAKİP</span>
-              <span class="tc-team" id="revealOppTeam"></span>
+            <div class="vs-seam"><span>VS</span></div>
+            <div class="vs-panel vs-theirs">
+              <span class="vs-label" id="revealOppLabel">RAKİP</span>
+              <span class="vs-team" id="revealOppTeam"></span>
             </div>
           </div>
         </div>
 
+        <!-- GUESS -->
         <div id="guessPhase" class="phase hidden">
-          <p class="phase-title">Her iki takımda da oynamış bir futbolcu yaz!</p>
-          <input id="guessInput" class="text-input big" type="text" placeholder="Futbolcu adı..." autocomplete="off" enterkeyhint="send" inputmode="text">
-          <button id="btnSubmitGuess" class="btn btn-primary">Gönder</button>
+          <div class="phase-ask">
+            <p class="phase-title">İki takımda da oynamış<br><strong>bir futbolcu yaz!</strong></p>
+            <input id="guessInput" class="text-input hero" type="text" placeholder="Futbolcu adı..." autocomplete="off" enterkeyhint="send" inputmode="text">
+            <button id="btnSubmitGuess" class="btn btn-primary btn-block">Gönder</button>
+          </div>
           <p id="guessFeedback" class="feedback"></p>
           <div class="timer-bar-wrap"><div id="timerBar" class="timer-bar"></div></div>
         </div>
 
+        <!-- ROUND RESULT -->
         <div id="resultPhase" class="phase hidden">
-          <p id="resultText" class="result-text"></p>
+          <div class="verdict" id="verdictBox">
+            <span class="verdict-mark" id="verdictMark">✓</span>
+            <p id="resultText" class="result-text"></p>
+          </div>
         </div>
       </div>
     </section>
 
     <!-- GAME OVER -->
     <section id="screen-over" class="screen">
-      <h2 id="overTitle">Oyun Bitti</h2>
-      <p id="overScore" class="over-score"></p>
+      <div class="over-box">
+        <h2 id="overTitle">Oyun Bitti</h2>
+        <p id="overScore" class="over-score"></p>
+      </div>
       <button id="btnRematch" class="btn btn-primary">Yeni Oyun</button>
     </section>
 
