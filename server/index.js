@@ -70,9 +70,9 @@ function clearTimer(room) {
   }
 }
 
-function startRound(room) {
+function startRound(room, { retry = false } = {}) {
   clearTimer(room);
-  room.round += 1;
+  if (!retry) room.round += 1;
   room.state = 'countdown';
   room.teamSubs = {};
   room.playerGuessResolved = false;
@@ -113,13 +113,13 @@ function resolveTeamsPhase(room) {
 
   if (!subA || !subB) {
     io.to(room.id).emit('roundVoid', { reason: 'timeout_team' });
-    room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
+    room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
     return;
   }
 
   if (subA.id === subB.id) {
     io.to(room.id).emit('roundVoid', { reason: 'same_team' });
-    room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
+    room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
     return;
   }
 
@@ -137,7 +137,11 @@ function resolveTeamsPhase(room) {
   room.timer = setTimeout(() => {
     if (!room.playerGuessResolved) {
       io.to(room.id).emit('roundVoid', { reason: 'timeout_guess' });
-      room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
+      if (room.round >= MAX_ROUNDS) {
+        room.timer = setTimeout(() => endGame(room), NEXT_ROUND_DELAY_MS);
+      } else {
+        room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
+      }
     }
   }, PLAYER_GUESS_MS);
 }
