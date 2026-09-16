@@ -77,9 +77,11 @@ let revealPhase = document.getElementById('revealPhase');
 let guessPhase = document.getElementById('guessPhase');
 let resultPhase = document.getElementById('resultPhase');
 let teamInput = document.getElementById('teamInput');
+let btnSubmitTeam = document.getElementById('btnSubmitTeam');
 let teamFeedback = document.getElementById('teamFeedback');
 let teamOppStatus = document.getElementById('teamOppStatus');
 let guessInput = document.getElementById('guessInput');
+let btnSubmitGuess = document.getElementById('btnSubmitGuess');
 let guessFeedback = document.getElementById('guessFeedback');
 let timerBar = document.getElementById('timerBar');
 let resultText = document.getElementById('resultText');
@@ -130,6 +132,7 @@ socket.on('openTeamSubmit', () => {
   hideAllPhases();
   teamPhase.classList.remove('hidden');
   teamInput.disabled = false;
+  btnSubmitTeam.disabled = false;
   teamInput.value = '';
   teamInput.focus();
 });
@@ -137,6 +140,7 @@ socket.on('openTeamSubmit', () => {
 document.getElementById('teamInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitTeam();
 });
+document.getElementById('btnSubmitTeam').addEventListener('click', submitTeam);
 
 function submitTeam() {
   const val = teamInput.value.trim();
@@ -146,6 +150,7 @@ function submitTeam() {
 
 socket.on('teamAccepted', ({ display }) => {
   teamInput.disabled = true;
+  btnSubmitTeam.disabled = true;
   teamFeedback.textContent = `✓ ${display} gönderildi. Rakip bekleniyor...`;
   teamFeedback.className = 'feedback ok';
 });
@@ -178,6 +183,7 @@ socket.on('teamsRevealed', ({ teams, timeoutMs }) => {
     hideAllPhases();
     guessPhase.classList.remove('hidden');
     guessInput.disabled = false;
+    btnSubmitGuess.disabled = false;
     guessInput.value = '';
     guessInput.focus();
     startGuessTimer(timeoutMs);
@@ -199,6 +205,7 @@ function startGuessTimer(timeoutMs) {
 document.getElementById('guessInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') submitGuess();
 });
+document.getElementById('btnSubmitGuess').addEventListener('click', submitGuess);
 
 function submitGuess() {
   const val = guessInput.value.trim();

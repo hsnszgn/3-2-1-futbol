@@ -57,7 +57,8 @@
 
         <div id="teamPhase" class="phase hidden">
           <p class="phase-title">Bir takım söyle!</p>
-          <input id="teamInput" class="text-input big" type="text" placeholder="Örn: Real Madrid" autocomplete="off">
+          <input id="teamInput" class="text-input big" type="text" placeholder="Örn: Real Madrid" autocomplete="off" enterkeyhint="send" inputmode="text">
+          <button id="btnSubmitTeam" class="btn btn-primary">Gönder</button>
           <p id="teamFeedback" class="feedback"></p>
           <div class="opponent-status" id="teamOppStatus"></div>
         </div>
@@ -78,7 +79,8 @@
 
         <div id="guessPhase" class="phase hidden">
           <p class="phase-title">Her iki takımda da oynamış bir futbolcu yaz!</p>
-          <input id="guessInput" class="text-input big" type="text" placeholder="Futbolcu adı..." autocomplete="off">
+          <input id="guessInput" class="text-input big" type="text" placeholder="Futbolcu adı..." autocomplete="off" enterkeyhint="send" inputmode="text">
+          <button id="btnSubmitGuess" class="btn btn-primary">Gönder</button>
           <p id="guessFeedback" class="feedback"></p>
           <div class="timer-bar-wrap"><div id="timerBar" class="timer-bar"></div></div>
         </div>
