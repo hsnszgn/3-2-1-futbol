@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: 3-2-1-futbol
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
