@@ -176,6 +176,10 @@ function resolveTeamsPhase(room) {
   room.commonPlayersPromise.then((result) => {
     if (!result.ok) {
       io.to(room.id).emit('lookupIssue', { reason: result.reason });
+    } else if (!result.players.length) {
+      // Perfectly possible for two clubs to share nobody — say so, rather than
+      // letting every guess come back as "no such player".
+      io.to(room.id).emit('lookupIssue', { reason: 'no_common_players' });
     }
   });
 

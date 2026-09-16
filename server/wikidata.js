@@ -17,8 +17,13 @@ const { normalize } = require('./data/teams');
 
 const SEARCH_ENDPOINT = 'https://www.wikidata.org/w/api.php';
 const SPARQL_ENDPOINT = 'https://query.wikidata.org/sparql';
-const SEARCH_TIMEOUT_MS = 8000;
-const SPARQL_TIMEOUT_MS = 15000;
+// A lookup that outlives the round is worse than one that fails: the player
+// taps submit, sees "checking...", and never gets an answer because the round
+// timed out around them. So the whole lookup runs against a single budget that
+// is comfortably shorter than the guess window in server/index.js.
+const LOOKUP_BUDGET_MS = 14000;
+const SEARCH_TIMEOUT_MS = 5000;
+const SPARQL_TIMEOUT_MS = 9000;
 const TEAM_TTL_MS = 24 * 60 * 60 * 1000;
 const PLAYERS_TTL_MS = 60 * 60 * 1000;
 const USER_AGENT = '3-2-1-Futbol/1.0 (https://github.com/hsnszgn/3-2-1-futbol)';
@@ -44,11 +49,17 @@ async function fetchJson(url, timeoutMs) {
   }
 }
 
-async function fetchJsonWithRetry(url, timeoutMs) {
+// Retries only while the shared deadline still allows it, so a slow Wikidata
+// can never stretch a lookup past the end of the round.
+async function fetchJsonWithRetry(url, timeoutMs, deadline) {
+  const firstAttempt = Math.min(timeoutMs, deadline - Date.now());
+  if (firstAttempt <= 0) throw new Error('lookup budget exhausted');
   try {
-    return await fetchJson(url, timeoutMs);
+    return await fetchJson(url, firstAttempt);
   } catch (err) {
-    return fetchJson(url, timeoutMs);
+    const retryWindow = Math.min(timeoutMs, deadline - Date.now());
+    if (retryWindow < 1500) throw err;
+    return fetchJson(url, retryWindow);
   }
 }
 
@@ -65,13 +76,13 @@ function labelLooksLikeTeam(label, searchTerm) {
 
 const CLUBBY = /football|soccer|\bf\.?c\.?\b|\bc\.?f\.?\b|\ba\.?c\.?\b|\bs\.?k\.?\b|sports club|sport(s)? team/i;
 
-async function resolveTeamCandidates(displayName) {
+async function resolveTeamCandidates(displayName, deadline) {
   const cached = teamCandidateCache.get(displayName);
   if (cached && cached.expiresAt > Date.now()) return cached.candidates;
 
   const url = `${SEARCH_ENDPOINT}?action=wbsearchentities&search=${encodeURIComponent(displayName)}`
     + '&language=en&uselang=en&type=item&format=json&limit=50';
-  const data = await fetchJsonWithRetry(url, SEARCH_TIMEOUT_MS);
+  const data = await fetchJsonWithRetry(url, SEARCH_TIMEOUT_MS, deadline);
   const results = data && Array.isArray(data.search) ? data.search : [];
 
   const matching = results.filter((r) => labelLooksLikeTeam(r.label || '', displayName)
@@ -90,7 +101,7 @@ async function resolveTeamCandidates(displayName) {
   return candidates;
 }
 
-async function fetchCommonPlayers(qidsA, qidsB) {
+async function fetchCommonPlayers(qidsA, qidsB, deadline) {
   const key = `${[...qidsA].sort().join(',')}|${[...qidsB].sort().join(',')}`;
   const cached = commonPlayersCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.players;
@@ -119,7 +130,7 @@ async function fetchCommonPlayers(qidsA, qidsB) {
     LIMIT 3000
   `;
   const url = `${SPARQL_ENDPOINT}?format=json&query=${encodeURIComponent(query)}`;
-  const data = await fetchJsonWithRetry(url, SPARQL_TIMEOUT_MS);
+  const data = await fetchJsonWithRetry(url, SPARQL_TIMEOUT_MS, deadline);
   const rows = data && data.results && Array.isArray(data.results.bindings) ? data.results.bindings : [];
 
   const byQid = new Map();
@@ -144,11 +155,13 @@ async function fetchCommonPlayers(qidsA, qidsB) {
  * Returns { ok: true, players: [{name, aliases}], debug } or { ok: false, reason, debug }.
  */
 async function getCommonPlayers(teamDisplayA, teamDisplayB) {
+  const startedAt = Date.now();
+  const deadline = startedAt + LOOKUP_BUDGET_MS;
   const debug = { teamA: teamDisplayA, teamB: teamDisplayB };
   try {
     const [candA, candB] = await Promise.all([
-      resolveTeamCandidates(teamDisplayA),
-      resolveTeamCandidates(teamDisplayB),
+      resolveTeamCandidates(teamDisplayA, deadline),
+      resolveTeamCandidates(teamDisplayB, deadline),
     ]);
     debug.candidatesA = candA;
     debug.candidatesB = candB;
@@ -157,11 +170,17 @@ async function getCommonPlayers(teamDisplayA, teamDisplayB) {
       return { ok: false, reason: 'team_not_found', debug };
     }
 
-    const players = await fetchCommonPlayers(candA.map((c) => c.qid), candB.map((c) => c.qid));
+    const players = await fetchCommonPlayers(
+      candA.map((c) => c.qid),
+      candB.map((c) => c.qid),
+      deadline,
+    );
     debug.playerCount = players.length;
+    debug.elapsedMs = Date.now() - startedAt;
     return { ok: true, players, debug };
   } catch (err) {
     debug.error = err.message;
+    debug.elapsedMs = Date.now() - startedAt;
     return { ok: false, reason: 'lookup_failed', debug };
   }
 }

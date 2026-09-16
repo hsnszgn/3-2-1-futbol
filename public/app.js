@@ -217,12 +217,28 @@ document.getElementById('guessInput').addEventListener('keydown', (e) => {
 document.getElementById('btnSubmitGuess').addEventListener('click', submitGuess);
 guessInput.addEventListener('focus', () => scrollButtonIntoView(btnSubmitGuess));
 
+let pendingGuessTimer = null;
+
+function clearPendingGuess() {
+  if (pendingGuessTimer) {
+    clearTimeout(pendingGuessTimer);
+    pendingGuessTimer = null;
+  }
+}
+
 function submitGuess() {
   const val = guessInput.value.trim();
   if (!val || guessInput.disabled) return;
   guessFeedback.textContent = 'Kontrol ediliyor...';
   guessFeedback.className = 'feedback';
   socket.emit('submitGuess', { guess: val });
+
+  // Never let a slow answer look like a dead button.
+  clearPendingGuess();
+  pendingGuessTimer = setTimeout(() => {
+    guessFeedback.textContent = 'Doğrulama uzun sürüyor, bekle...';
+    guessFeedback.className = 'feedback';
+  }, 3000);
 }
 
 const GUESS_REJECT_MESSAGES = {
@@ -230,9 +246,11 @@ const GUESS_REJECT_MESSAGES = {
   no_common_team: 'Bu oyuncu bu iki takımda birlikte oynamamış.',
   lookup_failed: 'Doğrulama servisine şu an ulaşılamıyor, birkaç saniye sonra tekrar dene.',
   team_not_found: 'Bu takımlardan biri veri kaynağında bulunamadı.',
+  no_common_players: 'Bu iki takımda birlikte oynamış futbolcu bulunamadı.',
 };
 
 socket.on('guessRejected', ({ reason }) => {
+  clearPendingGuess();
   guessFeedback.textContent = GUESS_REJECT_MESSAGES[reason] || 'Geçersiz cevap, tekrar dene.';
   guessFeedback.className = 'feedback error';
   guessInput.value = '';
@@ -246,6 +264,7 @@ socket.on('lookupIssue', ({ reason }) => {
 // The round was already won while this guess was on its way — the answer
 // wasn't wrong, the opponent was simply faster.
 socket.on('guessTooLate', () => {
+  clearPendingGuess();
   guessFeedback.textContent = 'Rakip senden hızlı davrandı!';
   guessFeedback.className = 'feedback error';
   guessInput.disabled = true;
@@ -253,6 +272,7 @@ socket.on('guessTooLate', () => {
 });
 
 socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
+  clearPendingGuess();
   clearInterval(guessTimerInterval);
   hideAllPhases();
   resultPhase.classList.remove('hidden');
@@ -265,6 +285,7 @@ socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
 });
 
 socket.on('roundVoid', ({ reason }) => {
+  clearPendingGuess();
   clearInterval(guessTimerInterval);
   hideAllPhases();
   resultPhase.classList.remove('hidden');
