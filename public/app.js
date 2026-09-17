@@ -13,6 +13,8 @@ const screens = {
 
 function showScreen(name) {
   for (const key in screens) screens[key].classList.toggle('active', key === name);
+  // The mute button sits in a different corner during a game — see style.css.
+  document.body.classList.toggle('in-game', name === 'game');
 }
 
 const btnMute = document.getElementById('btnMute');

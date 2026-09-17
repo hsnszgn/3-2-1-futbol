@@ -51,6 +51,9 @@ const Accounts = (() => {
     card.classList.toggle('hidden', !me);
     $('btnAuth').classList.toggle('hidden', !enabled || Boolean(me));
     $('btnBoard').classList.toggle('hidden', !enabled);
+    // Signed in, the account name is the name — asking for another one just
+    // invites a mismatch with the leaderboard.
+    $('nameInput').classList.toggle('hidden', Boolean(me));
     if (!me) return;
 
     $('accAvatar').textContent = (me.displayName || '?').charAt(0).toUpperCase();
@@ -173,15 +176,16 @@ const Accounts = (() => {
     mode = next;
     $('tabLogin').classList.toggle('active', mode === 'login');
     $('tabRegister').classList.toggle('active', mode === 'register');
-    $('authDisplay').classList.toggle('hidden', mode !== 'register');
-    $('btnAuthSubmit').textContent = mode === 'login' ? 'Giriş yap' : 'Kayıt ol';
+    $('btnAuthSubmit').textContent = mode === 'login' ? 'Giriş Yap' : 'Kayıt Ol';
+    // The hint explains what the username is used for; it only applies when
+    // one is being chosen.
+    $('authHint').classList.toggle('hidden', mode !== 'register');
     $('authStatus').textContent = '';
   }
 
   async function submitAuth() {
     const username = $('authUsername').value.trim();
     const password = $('authPassword').value;
-    const displayName = $('authDisplay').value.trim();
     const status = $('authStatus');
 
     if (!username || !password) {
@@ -191,7 +195,8 @@ const Accounts = (() => {
 
     $('btnAuthSubmit').disabled = true;
     status.textContent = 'Gönderiliyor...';
-    const payload = mode === 'login' ? { username, password } : { username, password, displayName };
+    // The username is the name: one thing to remember, nothing else to fill in.
+    const payload = { username, password };
     const { ok, body } = await api(`/api/${mode}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -234,7 +239,7 @@ const Accounts = (() => {
     $('tabLogin').addEventListener('click', () => setMode('login'));
     $('tabRegister').addEventListener('click', () => setMode('register'));
     $('btnAuthSubmit').addEventListener('click', submitAuth);
-    for (const id of ['authUsername', 'authDisplay', 'authPassword']) {
+    for (const id of ['authUsername', 'authPassword']) {
       $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
     }
   }

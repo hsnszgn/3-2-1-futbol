@@ -62,8 +62,8 @@
         </div>
         <p id="lobbyStatus" class="status-line"></p>
         <div class="lobby-links">
-          <button id="btnAuth" class="btn btn-text hidden">Kayıt ol / Giriş yap</button>
-          <button id="btnBoard" class="btn btn-text hidden">Lider Tablosu</button>
+          <button id="btnAuth" class="btn btn-nav hidden"><span>👤</span>Kayıt / Giriş</button>
+          <button id="btnBoard" class="btn btn-nav hidden"><span>🏆</span>Lider Tablosu</button>
         </div>
       </div>
     </section>
@@ -77,9 +77,9 @@
           <button id="tabLogin" class="tab active">Giriş</button>
           <button id="tabRegister" class="tab">Kayıt</button>
         </div>
-        <input id="authUsername" class="text-input" type="text" placeholder="kullanıcı adı" maxlength="16" autocomplete="username" autocapitalize="none">
-        <input id="authDisplay" class="text-input hidden" type="text" placeholder="Görünecek ad" maxlength="24" autocomplete="nickname">
-        <input id="authPassword" class="text-input" type="password" placeholder="şifre" maxlength="64" autocomplete="current-password">
+        <input id="authUsername" class="text-input" type="text" placeholder="Kullanıcı adın" maxlength="16" autocomplete="username" autocapitalize="none">
+        <input id="authPassword" class="text-input" type="password" placeholder="Şifren" maxlength="64" autocomplete="current-password">
+        <p id="authHint" class="panel-hint">Oyunda bu isimle görüneceksin. E-posta istemiyoruz.</p>
         <button id="btnAuthSubmit" class="btn btn-primary btn-block">Giriş yap</button>
         <p id="authStatus" class="status-line"></p>
         <button id="btnAuthBack" class="btn btn-text">Geri</button>

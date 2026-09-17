@@ -17,6 +17,10 @@
 Kayıt olmak zorunlu değil — misafir olarak her şey eskisi gibi oynanır. Ama
 kayıtlı iki oyuncunun oynadığı her maç kaydedilir ve lider tablosuna işlenir.
 
+Kayıt yalnızca bir kullanıcı adı ve bir şifre ister; e-posta ya da ayrı bir
+"görünecek ad" yok. Oyunda ve tabloda kullanıcı adı yazıldığı gibi görünür,
+girişte büyük/küçük harf farkı önemsenmez.
+
 - **Puan:** galibiyet 3, beraberlik 1, mağlubiyet 0.
 - **Kademe** (puana göre, kendi rengiyle): Bronz 0+, Gümüş 20+, Altın 50+,
   Platin 100+, Elit 200+.
