@@ -41,6 +41,11 @@ const has = (teamId) => squads.has(teamId);
 /**
  * Players common to two known clubs, straight from memory.
  * Returns null when either club is missing from the snapshot.
+ *
+ * The squad sets are complete, but the name table may not be (the build fetches
+ * names best-effort). A player whose name is missing is reported separately
+ * rather than dropped — dropping them silently turns a valid answer into a
+ * rejection, which is worse than one small live lookup.
  */
 function commonPlayers(teamIdA, teamIdB) {
   const a = squads.get(teamIdA);
@@ -49,12 +54,14 @@ function commonPlayers(teamIdA, teamIdB) {
 
   const [small, large] = a.size <= b.size ? [a, b] : [b, a];
   const players = [];
+  const missingQids = [];
   for (const qid of small) {
     if (!large.has(qid)) continue;
     const entry = names.get(qid);
     if (entry) players.push(entry);
+    else missingQids.push(qid);
   }
-  return players;
+  return { players, missingQids };
 }
 
 const info = () => meta;

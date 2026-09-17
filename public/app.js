@@ -163,6 +163,7 @@ let currentRound = 1;
 let opponentTeamCache = null;
 let guessTimerInterval = null;
 let teamTimerInterval = null;
+let revealTimer = null;
 
 function buzz(ms) {
   if (navigator.vibrate) navigator.vibrate(ms);
@@ -210,6 +211,7 @@ function hideAllPhases() {
 
 socket.on('roundStart', ({ round, maxRounds: mr, scores }) => {
   clearPendingTeam();
+  clearTimeout(revealTimer);
   maxRounds = mr;
   currentRound = round;
   roundLabel.textContent = `Round ${round}/${maxRounds}`;
@@ -352,7 +354,8 @@ socket.on('teamsRevealed', ({ teams, timeoutMs }) => {
   buzz(20);
 
   // The pause on the reveal is the drama — don't rush past it.
-  setTimeout(() => {
+  clearTimeout(revealTimer);
+  revealTimer = setTimeout(() => {
     hideAllPhases();
     guessPhase.classList.remove('hidden');
     guessInput.disabled = false;
@@ -432,6 +435,7 @@ socket.on('guessTooLate', () => {
 
 socket.on('roundResult', ({ winnerSocketId, playerName, points, elapsedMs, scores }) => {
   clearPendingGuess();
+  clearTimeout(revealTimer);
   clearInterval(guessTimerInterval);
   vignette.classList.remove('active');
   hideAllPhases();
@@ -459,6 +463,7 @@ socket.on('roundResult', ({ winnerSocketId, playerName, points, elapsedMs, score
 
 socket.on('roundVoid', ({ reason }) => {
   clearPendingGuess();
+  clearTimeout(revealTimer);
   clearInterval(guessTimerInterval);
   clearInterval(teamTimerInterval);
   vignette.classList.remove('active');
@@ -468,6 +473,7 @@ socket.on('roundVoid', ({ reason }) => {
     timeout_team: 'Süre doldu, takım yazılmadı.\nRound tekrarlanıyor.',
     same_team: 'Aynı takımı yazdınız!\nRound tekrarlanıyor.',
     timeout_guess: 'Kimse doğru oyuncuyu bulamadı.',
+    no_common_players: 'Bu iki takımda birlikte oynamış futbolcu yok.\nRound tekrarlanıyor.',
   };
   verdictBox.className = 'verdict';
   verdictMark.textContent = '–';

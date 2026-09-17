@@ -251,9 +251,27 @@ async function getCommonPlayers(teamA, teamB) {
   const offline = squadStore.commonPlayers(teamA.id, teamB.id);
   if (offline) {
     debug.source = 'snapshot';
-    debug.playerCount = offline.length;
+    let players = offline.players;
+
+    // Names the snapshot build didn't get to. Fetching just these keeps an
+    // incomplete name table from silently rejecting a correct answer.
+    if (offline.missingQids.length) {
+      debug.missingNames = offline.missingQids.length;
+      try {
+        const extra = await fetchPlayerNames(
+          offline.missingQids.map((qid) => `http://www.wikidata.org/entity/${qid}`),
+          deadline,
+        );
+        players = players.concat(extra);
+        debug.recoveredNames = extra.length;
+      } catch (err) {
+        debug.nameLookupError = err.message;
+      }
+    }
+
+    debug.playerCount = players.length;
     debug.elapsedMs = Date.now() - startedAt;
-    return { ok: true, players: offline, debug };
+    return { ok: true, players, debug };
   }
   debug.source = 'live';
 

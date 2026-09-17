@@ -88,6 +88,7 @@ app.get('/debug/lookup', async (req, res) => {
     debug: lookup.debug,
     guess: guess || undefined,
     guessMatched: guess && lookup.ok ? matchPlayerName(guess, lookup.players) : undefined,
+    snapshotLoaded: squadStore.info().loaded,
     players: lookup.ok ? lookup.players.map((p) => p.name) : undefined,
   });
 });
@@ -109,7 +110,34 @@ const io = new Server(server, {
 /** @type {Map<string, {id: string, players: Object[], round: number, scores: Object, state: string, teamSubs: Object, timer: any}>} */
 const rooms = new Map();
 const queue = []; // socket ids waiting for random match
-const codeRooms = new Map(); // roomCode -> roomId, for friend-code matching
+const codeRooms = new Map(); // room code -> { hostSocketId, createdAt }
+
+// An invite has to outlive the act of sending it: tapping share backgrounds
+// the browser and drops the host's socket, so anything tied to "host is
+// connected right now" would delete the code before the friend ever taps it.
+const INVITE_TTL_MS = 30 * 60 * 1000;
+const HOST_WAIT_MS = 8000;
+
+function waitForConnectedSocket(socketId, timeoutMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const poll = () => {
+      const s = io.sockets.sockets.get(socketId);
+      if (s && s.connected) return resolve(s);
+      if (Date.now() >= deadline) return resolve(null);
+      setTimeout(poll, 400);
+    };
+    poll();
+  });
+}
+
+// Codes are kept across disconnects, so they need sweeping instead.
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, entry] of codeRooms) {
+    if (now - entry.createdAt > INVITE_TTL_MS) codeRooms.delete(code);
+  }
+}, 5 * 60 * 1000).unref();
 
 function makeRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -219,12 +247,27 @@ function resolveTeamsPhase(room) {
   // guess, this has usually already resolved and matching is instant.
   room.commonPlayersPromise = getCommonPlayers(subA, subB);
   room.commonPlayersPromise.then((result) => {
+    if (rooms.get(room.id) !== room || room.state !== 'player-submit' || room.playerGuessResolved) return;
+
     if (!result.ok) {
       io.to(room.id).emit('lookupIssue', { reason: result.reason });
-    } else if (!result.players.length) {
-      // Perfectly possible for two clubs to share nobody — say so, rather than
-      // letting every guess come back as "no such player".
-      io.to(room.id).emit('lookupIssue', { reason: 'no_common_players' });
+      return;
+    }
+    if (!result.players.length) {
+      // Two clubs can genuinely share nobody, and then the round is
+      // unwinnable by anyone. Letting it run down the clock would count it as
+      // played — which on the last round simply hands the game to whoever is
+      // ahead. Replay it instead, immediately, so nobody types for nothing.
+      clearTimer(room);
+      room.playerGuessResolved = true; // stop any in-flight guess from scoring
+
+      // Let the reveal finish first — otherwise the players never see which
+      // two clubs came up, and the round just blinks past them.
+      const afterReveal = Math.max(0, (room.guessOpensAt || 0) - Date.now());
+      room.timer = setTimeout(() => {
+        io.to(room.id).emit('roundVoid', { reason: 'no_common_players' });
+        room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
+      }, afterReveal);
     }
   });
 
@@ -322,26 +365,41 @@ io.on('connection', (socket) => {
     socket.data.name = safeName;
     let code = makeRoomCode();
     while (codeRooms.has(code)) code = makeRoomCode();
-    codeRooms.set(code, { hostSocketId: socket.id });
+    codeRooms.set(code, { hostSocketId: socket.id, createdAt: Date.now() });
     socket.data.pendingCode = code;
     socket.emit('privateRoomCreated', { code });
   });
 
-  socket.on('joinPrivateRoom', ({ name, code }) => {
+  socket.on('joinPrivateRoom', async ({ name, code }) => {
     const safeName = (name || '').toString().trim().slice(0, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
     socket.data.name = safeName;
     const normalizedCode = (code || '').toString().trim().toUpperCase();
     const entry = codeRooms.get(normalizedCode);
+
     if (!entry) {
-      socket.emit('errorMessage', { message: 'Oda kodu bulunamadı.' });
+      socket.emit('errorMessage', { message: 'Oda kodu bulunamadı ya da süresi doldu.' });
       return;
     }
-    const hostSocket = io.sockets.sockets.get(entry.hostSocketId);
-    if (!hostSocket || !hostSocket.connected) {
-      socket.emit('errorMessage', { message: 'Oda sahibi bağlantısı koptu.' });
+    if (Date.now() - entry.createdAt > INVITE_TTL_MS) {
       codeRooms.delete(normalizedCode);
+      socket.emit('errorMessage', { message: 'Bu davetin süresi dolmuş, yeni bir kod oluşturun.' });
       return;
     }
+
+    // Sharing an invite means leaving the browser, which drops the host's
+    // socket — so a host who looks offline right now is usually just on their
+    // way back. Give them a moment before writing the invite off.
+    const hostSocket = await waitForConnectedSocket(entry.hostSocketId, HOST_WAIT_MS);
+    if (!hostSocket) {
+      codeRooms.delete(normalizedCode);
+      socket.emit('errorMessage', { message: 'Oda sahibi çevrimdışı, yeni bir kod isteyin.' });
+      return;
+    }
+    if (hostSocket.data.roomId && rooms.has(hostSocket.data.roomId)) {
+      socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
+      return;
+    }
+
     codeRooms.delete(normalizedCode);
     createRoom(hostSocket, socket);
   });
@@ -460,7 +518,9 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     const idx = queue.findIndex((s) => s.id === socket.id);
     if (idx !== -1) queue.splice(idx, 1);
-    if (socket.data.pendingCode) codeRooms.delete(socket.data.pendingCode);
+    // Deliberately NOT deleting socket.data.pendingCode here: a host who taps
+    // "share" is disconnecting precisely because they are sending the invite.
+    // The code expires on its own (INVITE_TTL_MS) instead.
 
     const roomId = socket.data.roomId;
     if (!roomId) return;

@@ -80,10 +80,13 @@ async function main() {
     await sleep(POLITENESS_MS);
   }
 
-  // Drop players we have no name for — they can't be matched against a guess.
-  for (const [teamId, qids] of Object.entries(squads)) {
-    squads[teamId] = qids.filter((qid) => names[qid]);
-  }
+  // Every squad keeps all of its players, including any whose name we didn't
+  // manage to fetch. Dropping them here is what silently turned correct
+  // answers into rejections; the server resolves the stragglers at runtime.
+  const unnamed = Object.values(squads)
+    .flat()
+    .filter((qid) => clubOf.get(qid) > 1 && !names[qid]).length;
+  if (unnamed) console.warn(`${unnamed} multi-club players have no name yet; server will fetch these on demand`);
 
   fs.mkdirSync(path.dirname(OUT_PATH), { recursive: true });
   fs.writeFileSync(OUT_PATH, JSON.stringify({
