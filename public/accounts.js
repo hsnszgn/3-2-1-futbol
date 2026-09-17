@@ -31,8 +31,12 @@ const Accounts = (() => {
     } catch (err) { /* nothing we can do; the session just won't survive a reload */ }
   }
 
-  async function api(path, options) {
-    const res = await fetch(path, options);
+  // The token goes in a header rather than the URL, so it stays out of logs
+  // and browser history.
+  async function api(path, options = {}) {
+    const headers = { ...(options.headers || {}) };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(path, { ...options, headers });
     const body = await res.json().catch(() => ({}));
     return { ok: res.ok, status: res.status, body };
   }
@@ -136,7 +140,7 @@ const Accounts = (() => {
       paintAccountCard();
       return null;
     }
-    const { ok, body } = await api(`/api/me?token=${encodeURIComponent(token)}`);
+    const { ok, body } = await api('/api/me');
     if (!ok || !body.player) {
       // Expired or unknown token: drop it instead of retrying forever.
       saveToken('');
@@ -162,13 +166,22 @@ const Accounts = (() => {
     paintLeaderboard(body.entries || []);
   }
 
+  let minPassword = 6;
+
   const REASONS = {
     invalid_username: 'Kullanıcı adı 3-16 karakter olmalı: küçük harf, rakam ve _',
-    weak_password: 'Şifre en az 4 karakter olmalı.',
+    weak_password: () => `Şifre en az ${minPassword} karakter olmalı.`,
     username_taken: 'Bu kullanıcı adı alınmış.',
     bad_credentials: 'Kullanıcı adı veya şifre hatalı.',
     accounts_disabled: 'Kayıt sistemi şu an kapalı.',
+    not_signed_in: 'Oturumun sona ermiş, tekrar giriş yap.',
+    rate_limited: 'Çok fazla deneme yaptın. Biraz bekleyip tekrar dene.',
   };
+
+  function reasonText(reason) {
+    const text = REASONS[reason];
+    return (typeof text === 'function' ? text() : text) || 'Bir şeyler ters gitti, tekrar dene.';
+  }
 
   let mode = 'login';
 
@@ -205,7 +218,7 @@ const Accounts = (() => {
     $('btnAuthSubmit').disabled = false;
 
     if (!ok || !body.token) {
-      status.textContent = REASONS[body.reason] || 'Bir şeyler ters gitti, tekrar dene.';
+      status.textContent = reasonText(body.reason);
       return;
     }
     saveToken(body.token);
@@ -216,6 +229,9 @@ const Accounts = (() => {
   }
 
   function logout() {
+    // Tell the server first: while the token is still set, the request carries
+    // it, and the session must end there and not just in this browser.
+    api('/api/logout', { method: 'POST' }).catch(() => {});
     saveToken('');
     me = null;
     paintAccountCard();
@@ -228,6 +244,9 @@ const Accounts = (() => {
     const { ok, body } = await api('/api/config');
     enabled = Boolean(ok && body.accountsEnabled);
     tiers = (body && body.tiers) || [];
+    minPassword = (body && body.minPasswordLength) || minPassword;
+    $('authHint').textContent =
+      `Oyunda bu isimle görüneceksin. Şifre en az ${minPassword} karakter. E-posta istemiyoruz.`;
     paintAccountCard();
     if (enabled) await refreshMe();
 

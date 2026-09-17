@@ -41,11 +41,20 @@ const SCHEMA = `
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
+  -- Sessions expire. A token that never dies is a password that can never be
+  -- changed, and signing out has to mean something on the server too.
   CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
     player_id  INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '60 days'
   );
+
+  -- Tables created before sessions expired.
+  ALTER TABLE sessions ADD COLUMN IF NOT EXISTS
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '60 days';
+
+  CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
 
   -- One row per finished game. Stats are derived from these rather than kept
   -- as counters, so they can never drift out of step with history.

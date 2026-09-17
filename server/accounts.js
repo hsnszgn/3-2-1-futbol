@@ -9,6 +9,10 @@ const db = require('./db');
 
 const SCRYPT_KEYLEN = 64;
 const USERNAME_RE = /^[a-z0-9_]{3,16}$/;
+const MIN_PASSWORD_LENGTH = 6;
+// Long enough that nobody is signed out mid-season, short enough that a token
+// copied off a shared phone does not work forever.
+const SESSION_TTL = '60 days';
 
 // Match points. Draws are worth something, otherwise a drawn game feels like
 // nothing happened.
@@ -85,7 +89,7 @@ async function register(rawUsername, password, rawDisplayName) {
   if (!USERNAME_RE.test(username)) {
     return { ok: false, reason: 'invalid_username' };
   }
-  if (String(password || '').length < 4) {
+  if (String(password || '').length < MIN_PASSWORD_LENGTH) {
     return { ok: false, reason: 'weak_password' };
   }
 
@@ -110,7 +114,13 @@ async function login(rawUsername, password) {
     [username],
   );
   const player = rows[0];
-  if (!player || !(await verifyPassword(String(password || ''), player.password_hash))) {
+  if (!player) {
+    // Hash anyway: answering instantly for an unknown username, and slowly for
+    // a known one, tells an attacker which usernames exist.
+    await hashPassword(String(password || ''), 'timing');
+    return { ok: false, reason: 'bad_credentials' };
+  }
+  if (!(await verifyPassword(String(password || ''), player.password_hash))) {
     return { ok: false, reason: 'bad_credentials' };
   }
   return {
@@ -122,7 +132,11 @@ async function login(rawUsername, password) {
 
 async function createSession(playerId) {
   const token = crypto.randomBytes(32).toString('hex');
-  await db.query('INSERT INTO sessions (token, player_id) VALUES ($1, $2)', [token, playerId]);
+  await db.query(
+    `INSERT INTO sessions (token, player_id, expires_at)
+     VALUES ($1, $2, now() + interval '${SESSION_TTL}')`,
+    [token, playerId],
+  );
   return token;
 }
 
@@ -131,10 +145,23 @@ async function playerForToken(token) {
   const { rows } = await db.query(
     `SELECT p.id, p.username, p.display_name
      FROM sessions s JOIN players p ON p.id = s.player_id
-     WHERE s.token = $1`,
+     WHERE s.token = $1 AND s.expires_at > now()`,
     [String(token)],
   );
   return rows[0] || null;
+}
+
+/** Signing out has to end the session on the server, not just in the browser. */
+async function endSession(token) {
+  if (!token || !db.isEnabled()) return;
+  await db.query('DELETE FROM sessions WHERE token = $1', [String(token)]);
+}
+
+/** Expired rows are dead weight; clear them out periodically. */
+async function purgeExpiredSessions() {
+  if (!db.isEnabled()) return 0;
+  const { rowCount } = await db.query('DELETE FROM sessions WHERE expires_at <= now()');
+  return rowCount;
 }
 
 async function recordMatch({ playerAId, playerBId, scoreA, scoreB, winnerId }) {
@@ -207,6 +234,8 @@ module.exports = {
   register,
   login,
   playerForToken,
+  endSession,
+  purgeExpiredSessions,
   recordMatch,
   leaderboard,
   profile,
@@ -216,4 +245,5 @@ module.exports = {
   TIERS,
   ACTIVITY_RANKS,
   POINTS,
+  MIN_PASSWORD_LENGTH,
 };

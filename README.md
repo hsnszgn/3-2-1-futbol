@@ -35,6 +35,29 @@ girişte büyük/küçük harf farkı önemsenmez.
 İstatistikler sayaç olarak tutulmaz; her seferinde maç geçmişinden hesaplanır,
 bu yüzden geçmişle çelişmesi mümkün değil.
 
+### Güvenlik
+
+Oyun yakın çevrenin dışına açılacağı için hesap tarafı şu şekilde sıkılaştırıldı:
+
+- **Oturumlar 60 günde sona erer.** "Çıkış" artık sunucudaki oturumu da siler;
+  eskiden yalnızca tarayıcıdaki jetonu siliyordu, yani sızan bir jeton sonsuza
+  kadar geçerli kalıyordu. Süresi dolan satırlar 6 saatte bir temizlenir.
+- **Jeton URL'de taşınmaz.** `Authorization: Bearer ...` başlığıyla gider;
+  adres çubuğundaki bir jeton sunucu kayıtlarına, tarayıcı geçmişine ve
+  `Referer` başlığına düşerdi.
+- **Hız sınırı** (`server/rateLimit.js`, bellek içi, bağımlılıksız):
+  kayıt saatte 15/IP, giriş 15 dakikada 12/IP **ve** hesap başına 8 — böylece
+  denemeleri birçok IP'ye yaymak tek bir hesabı sınırsızca denemeye dönüşmez.
+  `/debug/*` uçları da sınırlı, çünkü her biri canlı Wikidata sorgusu tetikler.
+  Sınırlar `RATE_REGISTER`, `RATE_LOGIN`, `RATE_LOGIN_USER`, `RATE_API`,
+  `RATE_DEBUG` ortam değişkenleriyle değiştirilebilir.
+- **Kullanıcı adı sızdırmaz.** Bilinmeyen kullanıcı adında da şifre özeti
+  hesaplanır; yoksa "anında hayır" ile "yavaş hayır" arasındaki fark hangi
+  kullanıcı adlarının var olduğunu ele verirdi.
+- Şifre en az 6 karakter, JSON gövdesi en fazla 8 KB, tek bir IP'den en fazla
+  25 eşzamanlı soket (kuyruğu hayalet oyuncularla doldurmayı engellemek için).
+- `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` başlıkları.
+
 ### Kurulum (Postgres)
 
 Render'ın ücretsiz planında kalıcı disk yok, bu yüzden hesaplar harici bir

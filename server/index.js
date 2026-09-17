@@ -10,6 +10,7 @@ const { getCommonPlayers, resolveTeamByName, prefetchSquad } = require('./wikida
 const squadStore = require('./squadStore');
 const db = require('./db');
 const accounts = require('./accounts');
+const { createLimiter } = require('./rateLimit');
 
 // The local alias list handles the common cases instantly ("Man United",
 // "GS"); anything it doesn't know — a club nobody added, or a Turkish name
@@ -47,8 +48,37 @@ function pointsForSpeed(elapsedMs) {
 }
 
 const app = express();
-app.use(express.json());
+
+// Render terminates TLS in front of us, so without this every request looks
+// like it came from the proxy and one person's flood would rate-limit everyone.
+app.set('trust proxy', 1);
+
+// Nothing here accepts anything but a small JSON object.
+app.use(express.json({ limit: '8kb' }));
+
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  // Invite links carry a room code; don't hand it to whatever is linked next.
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// Registration is the expensive one to abuse (it creates rows), login is the
+// one worth guessing at, and the debug endpoints each fire live Wikidata
+// queries. The general limit is loose enough that normal play never sees it,
+// and registration is deliberately generous: a group of friends signing up
+// from one wifi within an hour is the normal case here, not abuse.
+const envInt = (name, fallback) => Number(process.env[name]) || fallback;
+const limitApi = createLimiter('api', envInt('RATE_API', 120), 60 * 1000);
+const limitRegister = createLimiter('register', envInt('RATE_REGISTER', 15), 60 * 60 * 1000);
+const limitLogin = createLimiter('login', envInt('RATE_LOGIN', 12), 15 * 60 * 1000);
+const limitLoginUser = createLimiter('login-user', envInt('RATE_LOGIN_USER', 8), 15 * 60 * 1000);
+const limitDebug = createLimiter('debug', envInt('RATE_DEBUG', 20), 60 * 1000);
+
+app.use('/api', limitApi);
 
 // --- accounts, stats, leaderboard -------------------------------------------
 // All of these answer 503 when DATABASE_URL isn't set, so the game itself
@@ -59,7 +89,7 @@ function requireDb(res) {
   return false;
 }
 
-app.post('/api/register', async (req, res) => {
+app.post('/api/register', limitRegister, async (req, res) => {
   if (!requireDb(res)) return;
   try {
     const { username, password, displayName } = req.body || {};
@@ -72,12 +102,24 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', limitLogin, async (req, res) => {
   if (!requireDb(res)) return;
   try {
     const { username, password } = req.body || {};
+    // Also limit attempts per account, so spreading them over many IPs does
+    // not turn into an unlimited guess at one person's password. Only wrong
+    // answers count, so signing in often is never what locks you out.
+    const account = String(username || '').trim().toLowerCase();
+    const allowed = limitLoginUser.check(account);
+    if (!allowed.ok) {
+      res.set('Retry-After', String(Math.ceil(allowed.retryAfterMs / 1000)));
+      return res.status(429).json({ reason: 'rate_limited', retryAfterMs: allowed.retryAfterMs });
+    }
     const result = await accounts.login(username, password);
-    if (!result.ok) return res.status(401).json({ reason: result.reason });
+    if (!result.ok) {
+      limitLoginUser.take(account);
+      return res.status(401).json({ reason: result.reason });
+    }
     res.json({ token: result.token, username: result.player.username, displayName: result.player.display_name });
   } catch (err) {
     console.error('login failed:', err.message);
@@ -85,11 +127,24 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// The token travels in a header, not the query string: URLs end up in server
+// logs, browser history and Referer headers.
+function tokenFrom(req) {
+  const header = req.get('authorization') || '';
+  return header.startsWith('Bearer ') ? header.slice(7) : '';
+}
+
 app.get('/api/me', async (req, res) => {
   if (!requireDb(res)) return;
-  const player = await accounts.playerForToken(req.query.token);
+  const player = await accounts.playerForToken(tokenFrom(req));
   if (!player) return res.status(401).json({ reason: 'not_signed_in' });
   res.json({ player: await accounts.profile(player.username) });
+});
+
+app.post('/api/logout', async (req, res) => {
+  if (!requireDb(res)) return;
+  await accounts.endSession(tokenFrom(req));
+  res.json({ ok: true });
 });
 
 app.get('/api/leaderboard', async (req, res) => {
@@ -112,6 +167,7 @@ app.get('/api/profile/:username', async (req, res) => {
 app.get('/api/config', (req, res) => {
   res.json({
     accountsEnabled: db.isEnabled(),
+    minPasswordLength: accounts.MIN_PASSWORD_LENGTH,
     tiers: accounts.TIERS,
     activityRanks: accounts.ACTIVITY_RANKS,
     points: accounts.POINTS,
@@ -125,7 +181,7 @@ app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
 // Did the deploy-time squad build actually produce anything? Answers that in
 // one look, without having to read build logs.
-app.get('/debug/snapshot', (req, res) => {
+app.get('/debug/snapshot', limitDebug, (req, res) => {
   res.json(squadStore.info());
 });
 
@@ -136,7 +192,7 @@ app.get('/debug/snapshot', (req, res) => {
 // which Wikidata items each club name resolved to, and what the common player
 // list actually contains — so a "that player should have counted" report can
 // be checked against real data instead of guessed at.
-app.get('/debug/lookup', async (req, res) => {
+app.get('/debug/lookup', limitDebug, async (req, res) => {
   const [teamA, teamB] = await Promise.all([
     resolveTeamInput(req.query.a),
     resolveTeamInput(req.query.b),
@@ -181,6 +237,28 @@ const io = new Server(server, {
 // Runs before 'connection', so socket.data.account is already there when the
 // first joinQueue arrives. Recovered connections skip this and keep the data
 // they had.
+// One person with a script could otherwise open hundreds of sockets and fill
+// the quick-match queue with ghosts. The cap is well above what a household
+// or an office behind one address would ever need.
+const MAX_SOCKETS_PER_IP = 25;
+const socketsPerIp = new Map();
+
+const ipOf = (socket) => (socket.handshake.headers['x-forwarded-for'] || '')
+  .split(',')[0].trim() || socket.handshake.address || 'unknown';
+
+io.use((socket, next) => {
+  const ip = ipOf(socket);
+  const open = socketsPerIp.get(ip) || 0;
+  if (open >= MAX_SOCKETS_PER_IP) return next(new Error('too_many_connections'));
+  socketsPerIp.set(ip, open + 1);
+  socket.once('disconnect', () => {
+    const left = (socketsPerIp.get(ip) || 1) - 1;
+    if (left > 0) socketsPerIp.set(ip, left);
+    else socketsPerIp.delete(ip);
+  });
+  next();
+});
+
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth && socket.handshake.auth.token;
@@ -715,5 +793,11 @@ server.listen(PORT, () => {
   console.log(`3-2-1 Futbol server listening on port ${PORT}`);
   // Creating the tables is safe to repeat, and a failure here only disables
   // accounts — the game itself must still come up.
-  db.migrate();
+  db.migrate().then((ready) => {
+    if (!ready) return;
+    const purge = () => accounts.purgeExpiredSessions()
+      .catch((err) => console.error('session purge failed:', err.message));
+    purge();
+    setInterval(purge, 6 * 60 * 60 * 1000).unref();
+  });
 });
