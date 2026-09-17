@@ -110,7 +110,7 @@ async function register(rawUsername, password, rawDisplayName) {
 async function login(rawUsername, password) {
   const username = String(rawUsername || '').trim().toLowerCase();
   const { rows } = await db.query(
-    'SELECT id, username, display_name, password_hash FROM players WHERE username = $1',
+    'SELECT id, username, display_name, password_hash FROM players WHERE username = $1 AND deleted_at IS NULL',
     [username],
   );
   const player = rows[0];
@@ -145,7 +145,7 @@ async function playerForToken(token) {
   const { rows } = await db.query(
     `SELECT p.id, p.username, p.display_name
      FROM sessions s JOIN players p ON p.id = s.player_id
-     WHERE s.token = $1 AND s.expires_at > now()`,
+     WHERE s.token = $1 AND s.expires_at > now() AND p.deleted_at IS NULL`,
     [String(token)],
   );
   return rows[0] || null;
@@ -175,6 +175,7 @@ async function recordMatch({ playerAId, playerBId, scoreA, scoreB, winnerId }) {
 async function leaderboard(limit = 50) {
   const { rows } = await db.query(
     `${db.STATS_SELECT}
+     WHERE p.deleted_at IS NULL
      GROUP BY p.id
      HAVING COUNT(m.id) > 0
      ORDER BY (COUNT(*) FILTER (WHERE m.winner_id = p.id) * ${POINTS.win}
@@ -190,7 +191,7 @@ async function leaderboard(limit = 50) {
 async function profile(rawUsername) {
   const username = String(rawUsername || '').trim().toLowerCase();
   const { rows } = await db.query(
-    `${db.STATS_SELECT} WHERE p.username = $1 GROUP BY p.id`,
+    `${db.STATS_SELECT} WHERE p.username = $1 AND p.deleted_at IS NULL GROUP BY p.id`,
     [username],
   );
   if (!rows[0]) return null;
@@ -199,6 +200,73 @@ async function profile(rawUsername) {
   const board = await leaderboard(1000);
   const listed = board.find((entry) => entry.username === username);
   return listed || decorate(rows[0], null);
+}
+
+/**
+ * Everything stored about one player, for a data-portability request.
+ * Read from the same tables the game reads, so it cannot go stale.
+ */
+async function exportAccount(playerId) {
+  const { rows: who } = await db.query(
+    'SELECT id, username, display_name, created_at FROM players WHERE id = $1 AND deleted_at IS NULL',
+    [playerId],
+  );
+  if (!who[0]) return null;
+
+  const { rows: matches } = await db.query(
+    `SELECT m.id, m.played_at, m.score_a, m.score_b,
+            a.display_name AS player_a, b.display_name AS player_b,
+            CASE WHEN m.winner_id IS NULL THEN 'beraberlik'
+                 WHEN m.winner_id = $1 THEN 'galibiyet'
+                 ELSE 'maglubiyet' END AS sonuc
+     FROM matches m
+     JOIN players a ON a.id = m.player_a
+     JOIN players b ON b.id = m.player_b
+     WHERE m.player_a = $1 OR m.player_b = $1
+     ORDER BY m.played_at`,
+    [playerId],
+  );
+
+  const { rows: sessions } = await db.query(
+    'SELECT created_at, expires_at FROM sessions WHERE player_id = $1 ORDER BY created_at',
+    [playerId],
+  );
+
+  return {
+    disaAktarildi: new Date().toISOString(),
+    hesap: {
+      kullaniciAdi: who[0].username,
+      gorunenAd: who[0].display_name,
+      kayitTarihi: who[0].created_at,
+      // Never exported: the password hash is a credential, not user data.
+    },
+    istatistikler: await profile(who[0].username),
+    maclar: matches,
+    // Session rows carry no IP or device data — only when they were created.
+    oturumlar: sessions,
+  };
+}
+
+/**
+ * Deletes a player's personal data.
+ *
+ * The row is tombstoned rather than dropped: matches reference players with
+ * ON DELETE CASCADE, so a hard delete would take the opponent's history with
+ * it. Identifying fields are cleared, the password and every session are
+ * destroyed, and the account can no longer be logged into or seen anywhere.
+ */
+async function deleteAccount(playerId) {
+  await db.query('DELETE FROM sessions WHERE player_id = $1', [playerId]);
+  const { rowCount } = await db.query(
+    `UPDATE players
+     SET username = 'silinmis_' || id,
+         display_name = 'Silinmiş oyuncu',
+         password_hash = '',
+         deleted_at = now()
+     WHERE id = $1 AND deleted_at IS NULL`,
+    [playerId],
+  );
+  return rowCount > 0;
 }
 
 /** Same as profile(), for a player we already know by id. */
@@ -236,6 +304,8 @@ module.exports = {
   playerForToken,
   endSession,
   purgeExpiredSessions,
+  exportAccount,
+  deleteAccount,
   recordMatch,
   leaderboard,
   profile,

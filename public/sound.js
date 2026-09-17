@@ -7,7 +7,8 @@
 
 const Sound = (() => {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  const STORAGE_KEY = '321futbol.muted';
+  // Key comes from the brand config so a rename can be migrated in one place.
+  const STORAGE_KEY = (window.__BRAND && window.__BRAND.storageKeys.muted) || '321futbol.muted';
 
   let ctx = null;
   let muted = false;

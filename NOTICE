@@ -1,0 +1,13 @@
+3-2-1 Futbol
+Copyright (c) 2026 Hasan Sözgün. All rights reserved.
+
+This product is proprietary software. See LICENSE.
+
+This product includes third-party open source software and data.
+Their licences and required attributions are listed in
+THIRD_PARTY_NOTICES.md, which is generated from the installed dependency
+tree by `npm run notices`.
+
+Football data is derived from Wikidata (https://www.wikidata.org), which
+publishes its structured data under the Creative Commons CC0 1.0 Universal
+public domain dedication.

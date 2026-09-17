@@ -1,5 +1,7 @@
 // The token rides along on the handshake so the server knows which account
 // this socket belongs to before the first event arrives.
+const BRAND = window.__BRAND || { name: '3-2-1 Futbol' };
+
 const socket = io({ auth: { token: Accounts.getToken() } });
 
 const screens = {
@@ -118,7 +120,7 @@ btnShareInvite.addEventListener('click', async () => {
 
   if (navigator.share) {
     try {
-      await navigator.share({ title: '3-2-1 Futbol', text, url });
+      await navigator.share({ title: BRAND.name, text, url });
       return;
     } catch (err) {
       return; // user dismissed the share sheet
@@ -266,7 +268,7 @@ socket.on('roundStart', ({ round, maxRounds: mr, scores }) => {
   clearTimeout(revealTimer);
   maxRounds = mr;
   currentRound = round;
-  roundLabel.textContent = `Round ${round}/${maxRounds}`;
+  roundLabel.textContent = `Tur ${round}/${maxRounds}`;
   renderPips(round);
   updateScores(scores);
   hideAllPhases();
@@ -522,15 +524,15 @@ socket.on('roundVoid', ({ reason }) => {
   hideAllPhases();
   resultPhase.classList.remove('hidden');
   const messages = {
-    timeout_team: 'Süre doldu, takım yazılmadı.\nRound tekrarlanıyor.',
-    same_team: 'Aynı takımı yazdınız!\nRound tekrarlanıyor.',
+    timeout_team: 'Süre doldu, takım yazılmadı.\nTur tekrarlanıyor.',
+    same_team: 'Aynı takımı yazdınız!\nTur tekrarlanıyor.',
     timeout_guess: 'Kimse doğru oyuncuyu bulamadı.',
-    no_common_players: 'Bu iki takımda birlikte oynamış futbolcu yok.\nRound tekrarlanıyor.',
+    no_common_players: 'Bu iki takımda birlikte oynamış futbolcu yok.\nTur tekrarlanıyor.',
   };
   verdictBox.className = 'verdict';
   verdictMark.textContent = '–';
   verdictPoints.classList.add('hidden');
-  resultText.textContent = messages[reason] || 'Round tekrarlanıyor.';
+  resultText.textContent = messages[reason] || 'Tur tekrarlanıyor.';
   resultText.style.whiteSpace = 'pre-line';
 });
 

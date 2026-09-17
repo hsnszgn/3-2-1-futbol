@@ -41,6 +41,12 @@ const SCHEMA = `
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
+  -- A deleted account is tombstoned rather than dropped: its identifying
+  -- fields are cleared, but the row stays so the OPPONENT's match history and
+  -- head-to-head record survive. Deleting one player must not erase another
+  -- player's wins.
+  ALTER TABLE players ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
   -- Sessions expire. A token that never dies is a password that can never be
   -- changed, and signing out has to mean something on the server too.
   CREATE TABLE IF NOT EXISTS sessions (
@@ -105,4 +111,9 @@ const STATS_SELECT = `
   LEFT JOIN matches m ON m.player_a = p.id OR m.player_b = p.id
 `;
 
-module.exports = { isEnabled, query, migrate, STATS_SELECT };
+/** Lets the process exit cleanly instead of waiting on idle pool sockets. */
+async function close() {
+  if (pool) await pool.end().catch(() => {});
+}
+
+module.exports = { isEnabled, query, migrate, close, STATS_SELECT };

@@ -1,12 +1,16 @@
 {
   "name": "3-2-1-futbol",
   "version": "1.0.0",
-  "description": "3-2-1 Futbol - iki oyunculu gercek zamanli takim/futbolcu isim oyunu",
+  "description": "Iki oyunculu gercek zamanli futbol takim/futbolcu isim oyunu",
+  "private": true,
+  "license": "UNLICENSED",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
-    "build:squads": "node scripts/build-squads.js"
+    "build:squads": "node scripts/build-squads.js",
+    "notices": "node scripts/third-party-notices.js",
+    "build:icons": "node scripts/build-icons.js"
   },
   "dependencies": {
     "express": "^4.19.2",

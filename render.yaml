@@ -11,6 +11,18 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 20.11.0
+      # Turns on the production posture: the /debug/* endpoints stop answering
+      # unless DEBUG_TOKEN is set and supplied.
+      - key: NODE_ENV
+        value: production
+      # Optional. Set it to reopen /debug/* for yourself:
+      #   /debug/lookup?a=Chelsea&b=Liverpool&key=<token>
+      - key: DEBUG_TOKEN
+        sync: false
+      # The canonical address, used for share links, og:url and the manifest.
+      # Set this when a custom domain is attached.
+      - key: PUBLIC_URL
+        sync: false
       # Accounts, stats and the leaderboard. Render's free tier has no
       # persistent disk, so this points at an external Postgres (Neon's free
       # tier is enough). Left unset, the game runs exactly as before with

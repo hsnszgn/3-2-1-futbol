@@ -26,7 +26,10 @@ const LOOKUP_BUDGET_MS = 14000;
 const SEARCH_TIMEOUT_MS = 5000;
 const SPARQL_TIMEOUT_MS = 9000;
 const TEAM_TTL_MS = 24 * 60 * 60 * 1000;
-const USER_AGENT = '3-2-1-Futbol/1.0 (https://github.com/hsnszgn/3-2-1-futbol)';
+const brand = require('../config/brand');
+
+// Wikidata's user-agent policy asks for an identifiable name and contact.
+const USER_AGENT = `${brand.packageName}/1.0 (${brand.contactUrl})`;
 
 const TEAM_RESOLVE_BUDGET_MS = 6000;
 

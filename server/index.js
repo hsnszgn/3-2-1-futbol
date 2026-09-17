@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const express = require('express');
 const { Server } = require('socket.io');
@@ -11,6 +12,7 @@ const squadStore = require('./squadStore');
 const db = require('./db');
 const accounts = require('./accounts');
 const { createLimiter } = require('./rateLimit');
+const brand = require('../config/brand');
 
 // The local alias list handles the common cases instantly ("Man United",
 // "GS"); anything it doesn't know — a club nobody added, or a Turkish name
@@ -61,10 +63,79 @@ app.use((req, res, next) => {
   res.set('X-Frame-Options', 'DENY');
   // Invite links carry a room code; don't hand it to whatever is linked next.
   res.set('Referrer-Policy', 'no-referrer');
+  res.set('Permissions-Policy', 'geolocation=(), camera=(), microphone=(), payment=()');
+  // Everything the page loads is either ours or Google Fonts; nothing else may
+  // run, and nothing may frame us.
+  res.set('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; '));
   next();
 });
 
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// --- branding ---------------------------------------------------------------
+// The name will change. Rather than a build step, the page is served with the
+// brand injected, so every client file reads one object instead of a literal.
+const BRAND_FOR_CLIENT = {
+  name: brand.name,
+  shortName: brand.shortName,
+  tagline: brand.tagline,
+  description: brand.description,
+  storageKeys: brand.storageKeys,
+  supportEmail: brand.supportEmail,
+  themeColor: brand.themeColor,
+};
+
+const INDEX_PATH = path.join(__dirname, '..', 'public', 'index.html');
+let indexCache = null;
+function renderIndex() {
+  if (indexCache) return indexCache;
+  const raw = fs.readFileSync(INDEX_PATH, 'utf8');
+  indexCache = raw
+    .replace(/\{\{BRAND_NAME\}\}/g, brand.name)
+    .replace(/\{\{BRAND_DESCRIPTION\}\}/g, brand.description)
+    .replace(/\{\{BRAND_THEME_COLOR\}\}/g, brand.themeColor)
+    .replace(/\{\{BRAND_LOCALE\}\}/g, brand.locale)
+    .replace(/\{\{BRAND_URL\}\}/g, brand.siteUrl)
+    .replace(/\{\{BRAND_JSON\}\}/g, JSON.stringify(BRAND_FOR_CLIENT).replace(/</g, '\\u003c'));
+  return indexCache;
+}
+
+app.get('/', (req, res) => res.type('html').send(renderIndex()));
+
+app.get('/manifest.webmanifest', (req, res) => {
+  res.type('application/manifest+json').json({
+    name: brand.name,
+    short_name: brand.shortName,
+    description: brand.description,
+    start_url: '/',
+    scope: '/',
+    display: 'standalone',
+    orientation: 'portrait',
+    background_color: brand.backgroundColor,
+    theme_color: brand.themeColor,
+    lang: brand.locale,
+    categories: ['games', 'sports'],
+    icons: [
+      { src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' },
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any maskable' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+    ],
+  });
+});
+
+app.get('/robots.txt', (req, res) => {
+  res.type('text').send(`User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /debug/\nSitemap: ${brand.siteUrl}/sitemap.xml\n`);
+});
+
+app.use(express.static(path.join(__dirname, '..', 'public'), { index: false }));
 
 // Registration is the expensive one to abuse (it creates rows), login is the
 // one worth guessing at, and the debug endpoints each fire live Wikidata
@@ -76,7 +147,24 @@ const limitApi = createLimiter('api', envInt('RATE_API', 120), 60 * 1000);
 const limitRegister = createLimiter('register', envInt('RATE_REGISTER', 15), 60 * 60 * 1000);
 const limitLogin = createLimiter('login', envInt('RATE_LOGIN', 12), 15 * 60 * 1000);
 const limitLoginUser = createLimiter('login-user', envInt('RATE_LOGIN_USER', 8), 15 * 60 * 1000);
+// Account export and deletion get their own budget. Sharing the login limiter
+// meant somebody else fumbling their password on the same network could stop
+// you deleting your own account — a right that must not be rate-limited away.
+const limitAccount = createLimiter('account', envInt('RATE_ACCOUNT', 10), 15 * 60 * 1000);
 const limitDebug = createLimiter('debug', envInt('RATE_DEBUG', 20), 60 * 1000);
+
+// The debug endpoints each fire live Wikidata queries under our User-Agent and
+// expose internal lookup state. Open to the world, they are both an
+// information leak and a way to get our IP throttled by Wikidata. In
+// production they exist only for whoever holds DEBUG_TOKEN.
+const DEBUG_TOKEN = process.env.DEBUG_TOKEN || '';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+function requireDebugAccess(req, res, next) {
+  if (!IS_PRODUCTION) return next();
+  if (DEBUG_TOKEN && req.get('x-debug-token') === DEBUG_TOKEN) return next();
+  if (DEBUG_TOKEN && req.query.key === DEBUG_TOKEN) return next();
+  return res.status(404).type('text').send('Not found');
+}
 
 app.use('/api', limitApi);
 
@@ -141,6 +229,32 @@ app.get('/api/me', async (req, res) => {
   res.json({ player: await accounts.profile(player.username) });
 });
 
+// Data portability and erasure. Both require the password again: a stolen
+// token should not be enough to download someone's history or wipe them out.
+app.post('/api/account/export', limitAccount, async (req, res) => {
+  if (!requireDb(res)) return;
+  const player = await accounts.playerForToken(tokenFrom(req));
+  if (!player) return res.status(401).json({ reason: 'not_signed_in' });
+  const check = await accounts.login(player.username, (req.body || {}).password);
+  if (!check.ok) return res.status(403).json({ reason: 'bad_credentials' });
+  const data = await accounts.exportAccount(player.id);
+  if (!data) return res.status(404).json({ reason: 'not_found' });
+  res.set('Content-Disposition', `attachment; filename="${player.username}-verilerim.json"`);
+  res.json(data);
+});
+
+app.post('/api/account/delete', limitAccount, async (req, res) => {
+  if (!requireDb(res)) return;
+  const player = await accounts.playerForToken(tokenFrom(req));
+  if (!player) return res.status(401).json({ reason: 'not_signed_in' });
+  const check = await accounts.login(player.username, (req.body || {}).password);
+  if (!check.ok) return res.status(403).json({ reason: 'bad_credentials' });
+  const done = await accounts.deleteAccount(player.id);
+  if (!done) return res.status(404).json({ reason: 'not_found' });
+  console.log(`account deleted: id=${player.id}`);
+  res.json({ ok: true });
+});
+
 app.post('/api/logout', async (req, res) => {
   if (!requireDb(res)) return;
   await accounts.endSession(tokenFrom(req));
@@ -181,7 +295,7 @@ app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
 // Did the deploy-time squad build actually produce anything? Answers that in
 // one look, without having to read build logs.
-app.get('/debug/snapshot', limitDebug, (req, res) => {
+app.get('/debug/snapshot', requireDebugAccess, limitDebug, (req, res) => {
   res.json(squadStore.info());
 });
 
@@ -192,7 +306,7 @@ app.get('/debug/snapshot', limitDebug, (req, res) => {
 // which Wikidata items each club name resolved to, and what the common player
 // list actually contains — so a "that player should have counted" report can
 // be checked against real data instead of guessed at.
-app.get('/debug/lookup', limitDebug, async (req, res) => {
+app.get('/debug/lookup', requireDebugAccess, limitDebug, async (req, res) => {
   const [teamA, teamB] = await Promise.all([
     resolveTeamInput(req.query.a),
     resolveTeamInput(req.query.b),
@@ -241,6 +355,18 @@ const io = new Server(server, {
 // the quick-match queue with ghosts. The cap is well above what a household
 // or an office behind one address would ever need.
 const MAX_SOCKETS_PER_IP = 25;
+
+// Anything arriving over a socket is attacker-controlled. Team names go on to
+// build a Wikidata search URL, so their length is bounded before they travel.
+const MAX_INPUT_LENGTH = 64;
+const cleanInput = (value) => (typeof value === 'string' ? value : '')
+  .replace(/[\u0000-\u001f\u007f]/g, '')
+  .trim()
+  .slice(0, MAX_INPUT_LENGTH);
+
+// A rejected team costs two Wikidata searches and does not end the round, so a
+// client could sit there spamming misses. Each socket gets a budget per round.
+const MAX_TEAM_ATTEMPTS_PER_ROUND = 8;
 const socketsPerIp = new Map();
 
 const ipOf = (socket) => (socket.handshake.headers['x-forwarded-for'] || '')
@@ -320,6 +446,7 @@ function createRoom(socketA, socketB) {
     scores: { [socketA.id]: 0, [socketB.id]: 0 },
     state: 'idle',
     teamSubs: {},
+    teamAttempts: {},
     playerGuessResolved: false,
     rematchRequests: new Set(),
     timer: null,
@@ -405,6 +532,7 @@ function startRound(room, { retry = false } = {}) {
 function openTeamSubmission(room) {
   room.state = 'team-submit';
   room.teamSubs = {};
+  room.teamAttempts = {};
   io.to(room.id).emit('openTeamSubmit', { timeoutMs: TEAM_SUBMIT_MS });
 
   clearTimer(room);
@@ -637,12 +765,25 @@ io.on('connection', (socket) => {
     createRoom(hostSocket, socket);
   });
 
-  socket.on('submitTeam', async ({ team }) => {
+  socket.on('submitTeam', async ({ team } = {}) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return; // already submitted
 
-    const resolved = await resolveTeamInput(team);
+    const attempts = (room.teamAttempts[socket.id] || 0) + 1;
+    room.teamAttempts[socket.id] = attempts;
+    if (attempts > MAX_TEAM_ATTEMPTS_PER_ROUND) {
+      socket.emit('teamRejected', { reason: 'too_many_attempts' });
+      return;
+    }
+
+    const name = cleanInput(team);
+    if (!name) {
+      socket.emit('teamRejected', { reason: 'unknown_team' });
+      return;
+    }
+
+    const resolved = await resolveTeamInput(name);
 
     // Resolving may have gone to the network — make sure the round is still
     // waiting for this team before acting on the answer.
@@ -670,9 +811,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('submitGuess', async ({ guess }) => {
+  socket.on('submitGuess', async ({ guess } = {}) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'player-submit') return;
+    const safeGuess = cleanInput(guess);
+    if (!safeGuess) return;
     // A correct answer the opponent beat you to isn't a wrong answer — say so,
     // otherwise a perfectly good guess looks like it was silently rejected.
     if (room.playerGuessResolved) {
@@ -692,13 +835,13 @@ io.on('connection', (socket) => {
     }
 
     if (!lookup.ok) {
-      socket.emit('guessRejected', { reason: lookup.reason, guess });
+      socket.emit('guessRejected', { reason: lookup.reason, guess: safeGuess });
       return;
     }
 
-    const matched = matchPlayerName(guess, lookup.players);
+    const matched = matchPlayerName(safeGuess, lookup.players);
     if (!matched) {
-      socket.emit('guessRejected', { reason: 'player_not_found', guess });
+      socket.emit('guessRejected', { reason: 'player_not_found', guess: safeGuess });
       return;
     }
 
@@ -789,8 +932,35 @@ function cleanupSocket(socket, disconnected = false) {
   socket.data.roomId = null;
 }
 
+// Render sends SIGTERM on every deploy and scale event. Without this the
+// process is killed mid-request and open sockets are dropped without notice.
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received — shutting down`);
+  io.emit('serverRestarting');
+  io.close();
+  server.close(() => {
+    db.close().finally(() => process.exit(0));
+  });
+  // Don't hang forever on a socket that refuses to close.
+  setTimeout(() => process.exit(0), 10000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// A crash should be loud and fatal, not a half-dead process serving errors.
+process.on('unhandledRejection', (err) => {
+  console.error('unhandled rejection:', err && err.stack ? err.stack : err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('uncaught exception:', err && err.stack ? err.stack : err);
+  shutdown('uncaughtException');
+});
+
 server.listen(PORT, () => {
-  console.log(`3-2-1 Futbol server listening on port ${PORT}`);
+  console.log(`${brand.name} server listening on port ${PORT}`);
   // Creating the tables is safe to repeat, and a failure here only disables
   // accounts — the game itself must still come up.
   db.migrate().then((ready) => {

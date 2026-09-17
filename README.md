@@ -2,6 +2,27 @@
 
 İki oyunculu, gerçek zamanlı takım/futbolcu isim oyunu.
 
+> **Özel yazılım.** Bu depo açık kaynak değildir; kullanım, kopyalama ve
+> dağıtım hakları saklıdır. Bkz. [LICENSE](LICENSE), [NOTICE](NOTICE),
+> [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+> Güvenlik bildirimi için [SECURITY.md](SECURITY.md).
+
+## Marka adı
+
+Oyun adının geçtiği her yer — sayfa başlığı, manifest, paylaşım metni,
+Wikidata User-Agent'ı, localStorage anahtarları — tek bir dosyadan okur:
+[`config/brand.js`](config/brand.js). Ad değişikliği orada yapılır.
+
+Tek istisna `storagePrefix`: değiştirmek giriş yapmış herkesin oturumunu
+düşürür, o yüzden önce bir geçiş kodu yazılmalı. Dosyadaki not bunu anlatır.
+
+## Veri ve gizlilik
+
+Uygulamanın gerçekte hangi veriyi topladığı, nerede tuttuğu ve nereye
+gönderdiği [`docs/VERI-ENVANTERI.md`](docs/VERI-ENVANTERI.md) içinde
+koddan çıkarılmış haliyle listelidir. Gizlilik metinleri bunun üzerine
+yazılmalıdır.
+
 ## Nasıl oynanır
 1. İsmini yaz, "Rastgele Rakip Bul" ile eşleş ya da "Arkadaşını Davet Et" ile
    tek tıkla davet linki gönder (`/?oda=KOD`). Linke basan kişi doğrudan senin

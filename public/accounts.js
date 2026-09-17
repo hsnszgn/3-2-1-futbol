@@ -6,7 +6,7 @@
 // the server knows whose match it is recording.
 
 const Accounts = (() => {
-  const TOKEN_KEY = '321futbol.token';
+  const TOKEN_KEY = (window.__BRAND && window.__BRAND.storageKeys.token) || '321futbol.token';
 
   let token = '';
   try {
