@@ -11,6 +11,20 @@ function showScreen(name) {
   for (const key in screens) screens[key].classList.toggle('active', key === name);
 }
 
+const btnMute = document.getElementById('btnMute');
+const verdictPoints = document.getElementById('verdictPoints');
+
+function paintMuteButton() {
+  btnMute.textContent = Sound.isMuted() ? '🔇' : '🔊';
+}
+paintMuteButton();
+btnMute.addEventListener('click', () => {
+  Sound.toggleMute();
+  paintMuteButton();
+});
+// Audio can only start from a user gesture; any lobby tap counts.
+document.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
+
 const nameInput = document.getElementById('nameInput');
 const codeInput = document.getElementById('codeInput');
 const lobbyStatus = document.getElementById('lobbyStatus');
@@ -224,6 +238,7 @@ socket.on('countdown', ({ value }) => {
   void countdownDisplay.offsetWidth;
   countdownDisplay.style.animation = '';
   buzz(value === 'GO' ? 25 : 12);
+  if (value === 'GO') Sound.go(); else Sound.tick();
 });
 
 socket.on('openTeamSubmit', ({ timeoutMs }) => {
@@ -299,6 +314,7 @@ socket.on('teamAccepted', ({ display }) => {
   btnSubmitTeam.disabled = true;
   teamLockedName.textContent = display;
   teamPhase.classList.add('locked');
+  Sound.lock();
   teamFeedback.textContent = '';
   teamFeedback.className = 'feedback';
   teamOppStatus.textContent = 'Rakip bekleniyor...';
@@ -317,6 +333,7 @@ socket.on('opponentTeamStatus', ({ submittedBy }) => {
   } else {
     teamOppStatus.textContent = `${oppName} hazır — sıra sende!`;
     buzz(15);
+    Sound.opponentReady();
   }
 });
 
@@ -395,6 +412,7 @@ socket.on('guessRejected', ({ reason }) => {
   guessFeedback.textContent = GUESS_REJECT_MESSAGES[reason] || 'Geçersiz cevap, tekrar dene.';
   guessFeedback.className = 'feedback error';
   guessInput.value = '';
+  Sound.reject();
 });
 
 socket.on('lookupIssue', ({ reason }) => {
@@ -412,7 +430,7 @@ socket.on('guessTooLate', () => {
   btnSubmitGuess.disabled = true;
 });
 
-socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
+socket.on('roundResult', ({ winnerSocketId, playerName, points, elapsedMs, scores }) => {
   clearPendingGuess();
   clearInterval(guessTimerInterval);
   vignette.classList.remove('active');
@@ -423,12 +441,20 @@ socket.on('roundResult', ({ winnerSocketId, playerName, scores }) => {
   const iWon = winnerSocketId === mySocketId;
   verdictBox.className = `verdict ${iWon ? 'win' : 'lose'}`;
   verdictMark.textContent = iWon ? '✓' : '✕';
-  resultText.textContent = iWon
-    ? `Sen daha hızlıydın!\n${playerName}`
-    : `${oppName} senden hızlı davrandı.\nDoğru cevap: ${playerName}`;
+
+  const seconds = ((elapsedMs || 0) / 1000).toFixed(1);
+  if (iWon) {
+    verdictPoints.textContent = `+${points}`;
+    verdictPoints.classList.remove('hidden');
+    resultText.textContent = `${seconds} saniyede buldun!\n${playerName}`;
+  } else {
+    verdictPoints.classList.add('hidden');
+    resultText.textContent = `${oppName} senden hızlıydı: ${seconds} sn (+${points})\nDoğru cevap: ${playerName}`;
+  }
   resultText.style.whiteSpace = 'pre-line';
   markPip(currentRound, iWon ? 'won' : 'lost');
   buzz(iWon ? [18, 60, 18] : 40);
+  if (iWon) Sound.win(); else Sound.lose();
 });
 
 socket.on('roundVoid', ({ reason }) => {
@@ -445,6 +471,7 @@ socket.on('roundVoid', ({ reason }) => {
   };
   verdictBox.className = 'verdict';
   verdictMark.textContent = '–';
+  verdictPoints.classList.add('hidden');
   resultText.textContent = messages[reason] || 'Round tekrarlanıyor.';
   resultText.style.whiteSpace = 'pre-line';
 });
@@ -472,6 +499,7 @@ socket.on('gameOver', ({ scores, winnerSocketId }) => {
   title.style.color = winnerSocketId === mySocketId ? '#2ecc71' : '';
   overScore.textContent = `${scores[mySocketId] ?? 0} - ${(oppId && scores[oppId]) || 0}`;
   buzz(winnerSocketId === mySocketId ? [20, 70, 20, 70, 30] : 45);
+  if (winnerSocketId === mySocketId) Sound.gameWin(); else Sound.gameLose();
 });
 
 socket.on('opponentLeft', () => {

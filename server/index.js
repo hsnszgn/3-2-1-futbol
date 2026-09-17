@@ -27,6 +27,23 @@ const PLAYER_GUESS_MS = 25000;
 const NEXT_ROUND_DELAY_MS = 3500;
 const RECONNECT_GRACE_MS = 12000;
 
+// Everyone scoring a flat point wasted the tension of a speed game: knowing
+// the answer instantly and dredging it up at the last second paid the same.
+// Points now fall off with the clock, which also keeps a 0-3 game alive.
+const SPEED_TIERS = [
+  { withinMs: 5000, points: 3 },
+  { withinMs: 12000, points: 2 },
+];
+const BASE_POINTS = 1;
+// Must match the reveal hold in public/app.js, so the speed clock starts when
+// the player can actually type.
+const REVEAL_HOLD_MS = 1600;
+
+function pointsForSpeed(elapsedMs) {
+  const tier = SPEED_TIERS.find((t) => elapsedMs <= t.withinMs);
+  return tier ? tier.points : BASE_POINTS;
+}
+
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
@@ -219,6 +236,10 @@ function resolveTeamsPhase(room) {
     timeoutMs: PLAYER_GUESS_MS,
   });
 
+  // The clock for speed scoring starts when the guess window opens on the
+  // client, which is after the reveal animation — not now.
+  room.guessOpensAt = Date.now() + REVEAL_HOLD_MS;
+
   clearTimer(room);
   room.timer = setTimeout(() => {
     if (!room.playerGuessResolved) {
@@ -392,11 +413,16 @@ io.on('connection', (socket) => {
 
     room.playerGuessResolved = true;
     clearTimer(room);
-    room.scores[socket.id] = (room.scores[socket.id] || 0) + 1;
+
+    const elapsedMs = Math.max(0, Date.now() - (room.guessOpensAt || Date.now()));
+    const points = pointsForSpeed(elapsedMs);
+    room.scores[socket.id] = (room.scores[socket.id] || 0) + points;
 
     io.to(room.id).emit('roundResult', {
       winnerSocketId: socket.id,
       playerName: matched,
+      points,
+      elapsedMs,
       scores: scoresForClient(room),
     });
 

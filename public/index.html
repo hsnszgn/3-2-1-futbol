@@ -12,6 +12,7 @@
 </head>
 <body>
   <div id="vignette" class="vignette"></div>
+  <button id="btnMute" class="mute-toggle" aria-label="Sesi aç/kapat">🔊</button>
   <div id="app">
 
     <!-- LOBBY -->
@@ -127,6 +128,7 @@
         <div id="resultPhase" class="phase hidden">
           <div class="verdict" id="verdictBox">
             <span class="verdict-mark" id="verdictMark">✓</span>
+            <span class="verdict-points hidden" id="verdictPoints"></span>
             <p id="resultText" class="result-text"></p>
           </div>
         </div>
@@ -149,6 +151,7 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="sound.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
