@@ -3,7 +3,9 @@
 İki oyunculu, gerçek zamanlı takım/futbolcu isim oyunu.
 
 ## Nasıl oynanır
-1. İsmini yaz, "Rastgele Rakip Bul" ile eşleş ya da bir arkadaşına oda kodu gönder.
+1. İsmini yaz, "Rastgele Rakip Bul" ile eşleş ya da "Arkadaşını Davet Et" ile
+   tek tıkla davet linki gönder (`/?oda=KOD`). Linke basan kişi doğrudan senin
+   odana düşer, kodu elle yazması gerekmez.
 2. "3-2-1" geri sayımından sonra ekrandaki kutuya bir futbol takımı yaz ve gönder.
 3. İki oyuncu da takımını gönderince takımlar karşılıklı açıklanır.
 4. Her iki takımda da oynamış bir futbolcunun adını ilk doğru yazan turu kazanır.
@@ -63,3 +65,8 @@ listesini ve yazılan ismin eşleşip eşleşmediğini (`guessMatched`) gösteri
 - Bir takım adı Wikidata'da ilk aramada doğru kulüple eşleşmezse (nadiren, belirsiz/az bilinen isimlerde olabilir) o round'da doğrulama başarısız olur ve kullanıcıya açık bir hata mesajı gösterilir (sessizce "bulunamadı" demez).
 - Wikidata servisi yanıt vermezse veya zaman aşımına uğrarsa (6 saniye limit), oyuncuya "doğrulama servisine ulaşılamıyor" mesajı gösterilir; round süre dolunca tekrarlanır.
 - Oda/eşleşme durumu ve önbellekler bellekte tutulur (in-memory) — sunucu yeniden başlatıldığında sıfırlanır. Çoklu sunucu/ölçeklenme için Redis gibi paylaşımlı bir store gerekir.
+- Render'ın ücretsiz planı 15 dakika kullanılmayınca uykuya geçer ve ilk istek
+  ~40 saniye sürer; davet linkine basan biri çoğunlukla o ekranda vazgeçer.
+  Ücretsiz çözüm: dışarıdan düzenli olarak `/healthz` adresine ping atan bir
+  uptime servisi (örn. 10 dakikada bir). Ücretsiz plandaki aylık 750 saatlik
+  kota, tek bir servisi sürekli ayakta tutmaya ancak yeter.

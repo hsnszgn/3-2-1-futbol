@@ -16,11 +16,18 @@ const codeInput = document.getElementById('codeInput');
 const lobbyStatus = document.getElementById('lobbyStatus');
 const waitingText = document.getElementById('waitingText');
 const roomCodeDisplay = document.getElementById('roomCodeDisplay');
+const btnShareInvite = document.getElementById('btnShareInvite');
+const shareStatus = document.getElementById('shareStatus');
+let currentInviteCode = null;
+
+const inviteUrlFor = (code) => `${location.origin}/?oda=${code}`;
+
 
 document.getElementById('btnQuickMatch').addEventListener('click', () => {
   lobbyStatus.textContent = '';
   waitingText.textContent = 'Rakip aranıyor...';
   roomCodeDisplay.textContent = '';
+  hideShareInvite();
   showScreen('waiting');
   socket.emit('joinQueue', { name: nameInput.value });
 });
@@ -42,6 +49,7 @@ document.getElementById('btnJoinRoom').addEventListener('click', () => {
   showScreen('waiting');
   waitingText.textContent = 'Odaya bağlanılıyor...';
   roomCodeDisplay.textContent = '';
+  hideShareInvite();
   socket.emit('joinPrivateRoom', { name: nameInput.value, code });
 });
 
@@ -55,10 +63,55 @@ socket.on('waiting', () => {
   waitingText.textContent = 'Rakip aranıyor...';
 });
 
+function hideShareInvite() {
+  currentInviteCode = null;
+  btnShareInvite.classList.add('hidden');
+  shareStatus.textContent = '';
+}
+
 socket.on('privateRoomCreated', ({ code }) => {
-  waitingText.textContent = 'Bu kodu arkadaşınla paylaş:';
+  currentInviteCode = code;
+  waitingText.textContent = 'Arkadaşını davet et';
   roomCodeDisplay.textContent = code;
+  btnShareInvite.classList.remove('hidden');
+  shareStatus.textContent = '';
 });
+
+// One tap to hand someone a link that drops them straight into this room —
+// typing a code by hand is where an invite usually dies.
+btnShareInvite.addEventListener('click', async () => {
+  if (!currentInviteCode) return;
+  const url = inviteUrlFor(currentInviteCode);
+  const text = `3-2-1 Futbol'da sana meydan okuyorum! Odama katıl: ${url}`;
+
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: '3-2-1 Futbol', text, url });
+      return;
+    } catch (err) {
+      return; // user dismissed the share sheet
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(url);
+    shareStatus.textContent = 'Link kopyalandı, arkadaşına yapıştır!';
+  } catch (err) {
+    shareStatus.textContent = url;
+  }
+});
+
+// Arriving from an invite link: prefill the code so joining is one tap.
+const inviteFromUrl = (new URLSearchParams(location.search).get('oda') || '')
+  .trim().toUpperCase().slice(0, 6);
+if (inviteFromUrl) {
+  codeInput.value = inviteFromUrl;
+  document.getElementById('inviteCode').textContent = inviteFromUrl;
+  document.getElementById('inviteBanner').classList.remove('hidden');
+  document.getElementById('btnJoinRoom').classList.replace('btn-ghost', 'btn-primary');
+  document.getElementById('btnQuickMatch').classList.replace('btn-primary', 'btn-ghost');
+  nameInput.focus();
+}
 
 socket.on('errorMessage', ({ message }) => {
   showScreen('lobby');

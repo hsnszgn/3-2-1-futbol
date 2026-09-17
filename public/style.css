@@ -101,6 +101,33 @@ body::before {
 
 .lobby-actions { display: flex; flex-direction: column; gap: 12px; }
 
+.hidden { display: none !important; }
+
+.invite-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 18px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 40px -18px var(--accent);
+}
+.invite-label {
+  font-family: var(--condensed);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+.invite-code {
+  font-family: var(--display);
+  font-size: 30px;
+  letter-spacing: 0.18em;
+}
+
 .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 .divider span { font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; }

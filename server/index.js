@@ -30,6 +30,11 @@ const RECONNECT_GRACE_MS = 12000;
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Cheap endpoint for an uptime pinger to hit. Render's free tier sleeps after
+// 15 minutes idle and then takes ~40s to wake, which is long enough that an
+// invited friend gives up before the page loads.
+app.get('/healthz', (req, res) => res.type('text').send('ok'));
+
 // Did the deploy-time squad build actually produce anything? Answers that in
 // one look, without having to read build logs.
 app.get('/debug/snapshot', (req, res) => {

@@ -21,11 +21,16 @@
         <p class="tagline">Aynı anda takım söyle.<br>Ortak oyuncuyu ilk sen bul.</p>
       </div>
 
+      <div id="inviteBanner" class="invite-banner hidden">
+        <span class="invite-label">Odaya davet edildin</span>
+        <span class="invite-code" id="inviteCode"></span>
+      </div>
+
       <div class="lobby-actions">
         <input id="nameInput" class="text-input" type="text" placeholder="Adını yaz" maxlength="24" autocomplete="off">
         <button id="btnQuickMatch" class="btn btn-primary">Rastgele Rakip Bul</button>
         <div class="divider"><span>veya</span></div>
-        <button id="btnCreateRoom" class="btn btn-ghost">Arkadaşına Kod Oluştur</button>
+        <button id="btnCreateRoom" class="btn btn-ghost">Arkadaşını Davet Et</button>
         <div class="join-row">
           <input id="codeInput" class="text-input code-input" type="text" placeholder="ODA KODU" maxlength="6" autocomplete="off">
           <button id="btnJoinRoom" class="btn btn-ghost">Katıl</button>
@@ -40,6 +45,8 @@
         <div class="pulse-ring"><span class="pulse-dot"></span></div>
         <p id="waitingText" class="waiting-text">Rakip aranıyor<span class="dots"><i>.</i><i>.</i><i>.</i></span></p>
         <p id="roomCodeDisplay" class="room-code-display"></p>
+        <button id="btnShareInvite" class="btn btn-primary hidden">Daveti Gönder</button>
+        <p id="shareStatus" class="status-line"></p>
       </div>
       <button id="btnCancelWait" class="btn btn-text">İptal</button>
     </section>
