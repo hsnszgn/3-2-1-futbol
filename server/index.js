@@ -8,6 +8,8 @@ const { resolveTeam, normalize } = require('./data/teams');
 const { matchPlayerName } = require('./gameLogic');
 const { getCommonPlayers, resolveTeamByName, prefetchSquad } = require('./wikidata');
 const squadStore = require('./squadStore');
+const db = require('./db');
+const accounts = require('./accounts');
 
 // The local alias list handles the common cases instantly ("Man United",
 // "GS"); anything it doesn't know — a club nobody added, or a Turkish name
@@ -45,7 +47,76 @@ function pointsForSpeed(elapsedMs) {
 }
 
 const app = express();
+app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// --- accounts, stats, leaderboard -------------------------------------------
+// All of these answer 503 when DATABASE_URL isn't set, so the game itself
+// keeps working with accounts simply switched off.
+function requireDb(res) {
+  if (db.isEnabled()) return true;
+  res.status(503).json({ reason: 'accounts_disabled' });
+  return false;
+}
+
+app.post('/api/register', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { username, password, displayName } = req.body || {};
+    const result = await accounts.register(username, password, displayName);
+    if (!result.ok) return res.status(400).json({ reason: result.reason });
+    res.json({ token: result.token, username: result.player.username, displayName: result.player.display_name });
+  } catch (err) {
+    console.error('register failed:', err.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    const { username, password } = req.body || {};
+    const result = await accounts.login(username, password);
+    if (!result.ok) return res.status(401).json({ reason: result.reason });
+    res.json({ token: result.token, username: result.player.username, displayName: result.player.display_name });
+  } catch (err) {
+    console.error('login failed:', err.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/me', async (req, res) => {
+  if (!requireDb(res)) return;
+  const player = await accounts.playerForToken(req.query.token);
+  if (!player) return res.status(401).json({ reason: 'not_signed_in' });
+  res.json({ player: await accounts.profile(player.username) });
+});
+
+app.get('/api/leaderboard', async (req, res) => {
+  if (!requireDb(res)) return;
+  try {
+    res.json({ entries: await accounts.leaderboard(50), tiers: accounts.TIERS });
+  } catch (err) {
+    console.error('leaderboard failed:', err.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/profile/:username', async (req, res) => {
+  if (!requireDb(res)) return;
+  const stats = await accounts.profile(req.params.username);
+  if (!stats) return res.status(404).json({ error: 'not_found' });
+  res.json(stats);
+});
+
+app.get('/api/config', (req, res) => {
+  res.json({
+    accountsEnabled: db.isEnabled(),
+    tiers: accounts.TIERS,
+    activityRanks: accounts.ACTIVITY_RANKS,
+    points: accounts.POINTS,
+  });
+});
 
 // Cheap endpoint for an uptime pinger to hit. Render's free tier sleeps after
 // 15 minutes idle and then takes ~40s to wake, which is long enough that an
@@ -107,6 +178,19 @@ const io = new Server(server, {
   },
 });
 
+// Runs before 'connection', so socket.data.account is already there when the
+// first joinQueue arrives. Recovered connections skip this and keep the data
+// they had.
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth && socket.handshake.auth.token;
+    if (token) socket.data.account = await accounts.playerForToken(token);
+  } catch (err) {
+    console.error('session lookup failed:', err.message);
+  }
+  next();
+});
+
 /** @type {Map<string, {id: string, players: Object[], round: number, scores: Object, state: string, teamSubs: Object, timer: any}>} */
 const rooms = new Map();
 const queue = []; // socket ids waiting for random match
@@ -151,8 +235,8 @@ function createRoom(socketA, socketB) {
   const room = {
     id: roomId,
     players: [
-      { socketId: socketA.id, name: socketA.data.name },
-      { socketId: socketB.id, name: socketB.data.name },
+      { socketId: socketA.id, name: nameFor(socketA), accountId: accountIdOf(socketA) },
+      { socketId: socketB.id, name: nameFor(socketB), accountId: accountIdOf(socketB) },
     ],
     round: 0,
     scores: { [socketA.id]: 0, [socketB.id]: 0 },
@@ -172,17 +256,45 @@ function createRoom(socketA, socketB) {
     const opponent = s === socketA ? socketB : socketA;
     s.emit('matched', {
       roomId,
-      opponentName: opponent.data.name,
+      opponentName: nameFor(opponent),
+      myName: nameFor(s),
       maxRounds: MAX_ROUNDS,
     });
   }
+
+  sendHeadToHead(room);
   startRound(room);
 }
+
+const accountIdOf = (socket) => (socket.data.account ? socket.data.account.id : null);
+// A signed-in player is known by their account name, so the leaderboard and
+// the scoreboard can't disagree about who just played.
+const nameFor = (socket) => (socket.data.account ? socket.data.account.display_name : socket.data.name);
 
 function clearTimer(room) {
   if (room.timer) {
     clearTimeout(room.timer);
     room.timer = null;
+  }
+}
+
+// The running series only exists for two signed-in players; guests get
+// nothing rather than a misleading 0-0.
+async function sendHeadToHead(room) {
+  const [a, b] = room.players;
+  if (!db.isEnabled() || !a.accountId || !b.accountId) return;
+  try {
+    const tally = await accounts.headToHead(a.accountId, b.accountId);
+    if (!tally.games) return;
+    for (const seat of room.players) {
+      const mine = seat === a ? tally.aWins : tally.bWins;
+      const theirs = seat === a ? tally.bWins : tally.aWins;
+      io.to(seat.socketId).emit('headToHead', {
+        games: tally.games, myWins: mine, theirWins: theirs, draws: tally.draws,
+      });
+    }
+  } catch (err) {
+    console.error('head-to-head lookup failed:', err.message);
   }
 }
 
@@ -317,6 +429,49 @@ function endGame(room) {
     scores: scoresForClient(room),
     winnerSocketId,
   });
+
+  saveMatch(room, { scoreA, scoreB, winnerSocketId });
+}
+
+// Only games between two signed-in players count: a guest has nowhere to put
+// the result, and a half-recorded game would distort both leaderboards.
+async function saveMatch(room, { scoreA, scoreB, winnerSocketId }) {
+  const [a, b] = room.players;
+  if (!db.isEnabled() || !a.accountId || !b.accountId) return;
+  const winnerId = winnerSocketId === a.socketId ? a.accountId
+    : winnerSocketId === b.socketId ? b.accountId
+    : null;
+  try {
+    await accounts.recordMatch({
+      playerAId: a.accountId,
+      playerBId: b.accountId,
+      scoreA,
+      scoreB,
+      winnerId,
+    });
+    await sendStatsUpdate(room);
+  } catch (err) {
+    console.error('could not record match:', err.message);
+  }
+}
+
+// After a recorded game both players get their updated profile and the new
+// state of the series between them.
+async function sendStatsUpdate(room) {
+  const [a, b] = room.players;
+  try {
+    const [profileA, profileB] = await Promise.all([
+      accounts.profileById(a.accountId),
+      accounts.profileById(b.accountId),
+    ]);
+    const byId = new Map([[a.accountId, profileA], [b.accountId, profileB]]);
+    for (const seat of room.players) {
+      io.to(seat.socketId).emit('statsUpdate', { me: byId.get(seat.accountId) });
+    }
+  } catch (err) {
+    console.error('could not send stats update:', err.message);
+  }
+  sendHeadToHead(room);
 }
 
 io.on('connection', (socket) => {
@@ -558,4 +713,7 @@ function cleanupSocket(socket, disconnected = false) {
 
 server.listen(PORT, () => {
   console.log(`3-2-1 Futbol server listening on port ${PORT}`);
+  // Creating the tables is safe to repeat, and a failure here only disables
+  // accounts — the game itself must still come up.
+  db.migrate();
 });

@@ -22,6 +22,30 @@
         <p class="tagline">Aynı anda takım söyle.<br>Ortak oyuncuyu ilk sen bul.</p>
       </div>
 
+      <!-- Signed-in player's own card: the stats behind their ranking, so the
+           average on the leaderboard is never a number without a basis. -->
+      <div id="accountCard" class="account-card hidden">
+        <div class="account-head">
+          <span class="account-avatar" id="accAvatar">?</span>
+          <div class="account-id">
+            <span class="account-name" id="accName"></span>
+            <span class="badge tier-badge" id="accTier"></span>
+          </div>
+          <button id="btnLogout" class="btn btn-text btn-inline">Çıkış</button>
+        </div>
+        <div class="account-stats">
+          <span class="stat"><b id="accPoints">0</b><i>puan</i></span>
+          <span class="stat stat-w"><b id="accWins">0</b><i>G</i></span>
+          <span class="stat stat-d"><b id="accDraws">0</b><i>B</i></span>
+          <span class="stat stat-l"><b id="accLosses">0</b><i>M</i></span>
+          <span class="stat"><b id="accRate">0%</b><i>oran</i></span>
+        </div>
+        <div class="account-foot">
+          <span class="badge activity-badge" id="accActivity"></span>
+          <span class="account-rank" id="accRank"></span>
+        </div>
+      </div>
+
       <div id="inviteBanner" class="invite-banner hidden">
         <span class="invite-label">Odaya davet edildin</span>
         <span class="invite-code" id="inviteCode"></span>
@@ -37,6 +61,42 @@
           <button id="btnJoinRoom" class="btn btn-ghost">Katıl</button>
         </div>
         <p id="lobbyStatus" class="status-line"></p>
+        <div class="lobby-links">
+          <button id="btnAuth" class="btn btn-text hidden">Kayıt ol / Giriş yap</button>
+          <button id="btnBoard" class="btn btn-text hidden">Lider Tablosu</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- AUTH -->
+    <section id="screen-auth" class="screen">
+      <div class="panel">
+        <h2 class="panel-title">Hesap</h2>
+        <p class="panel-note">Kayıt olursan maçların lider tablosuna işlenir.</p>
+        <div class="tabs">
+          <button id="tabLogin" class="tab active">Giriş</button>
+          <button id="tabRegister" class="tab">Kayıt</button>
+        </div>
+        <input id="authUsername" class="text-input" type="text" placeholder="kullanıcı adı" maxlength="16" autocomplete="username" autocapitalize="none">
+        <input id="authDisplay" class="text-input hidden" type="text" placeholder="Görünecek ad" maxlength="24" autocomplete="nickname">
+        <input id="authPassword" class="text-input" type="password" placeholder="şifre" maxlength="64" autocomplete="current-password">
+        <button id="btnAuthSubmit" class="btn btn-primary btn-block">Giriş yap</button>
+        <p id="authStatus" class="status-line"></p>
+        <button id="btnAuthBack" class="btn btn-text">Geri</button>
+      </div>
+    </section>
+
+    <!-- LEADERBOARD -->
+    <section id="screen-board" class="screen">
+      <div class="panel panel-wide">
+        <h2 class="panel-title">Lider Tablosu</h2>
+        <p class="panel-note">Galibiyet 3 puan · Beraberlik 1 puan<br>
+          <span class="legend-key">G/B/M</span> galibiyet / beraberlik / mağlubiyet ·
+          <span class="legend-key">ort</span> maç başına puan</p>
+        <div id="boardList" class="board-list"></div>
+        <p id="boardStatus" class="status-line"></p>
+        <div id="tierLegend" class="tier-legend"></div>
+        <button id="btnBoardBack" class="btn btn-text">Geri</button>
       </div>
     </section>
 
@@ -76,6 +136,10 @@
           <span class="avatar avatar-opp" id="oppAvatar">R</span>
         </div>
       </header>
+
+      <!-- The running series against this opponent, shown before the first
+           round so both know who is ahead. -->
+      <p id="h2hBanner" class="h2h-banner hidden"></p>
 
       <div class="game-stage">
         <div id="countdownDisplay" class="countdown"></div>
@@ -140,6 +204,8 @@
       <div class="over-box">
         <h2 id="overTitle">Oyun Bitti</h2>
         <p id="overScore" class="over-score"></p>
+        <p id="overH2h" class="h2h-banner hidden"></p>
+        <p id="overStats" class="over-stats hidden"></p>
       </div>
       <div class="over-actions">
         <button id="btnRematch" class="btn btn-primary btn-block">Rövanş!</button>
@@ -152,6 +218,7 @@
 
   <script src="/socket.io/socket.io.js"></script>
   <script src="sound.js"></script>
+  <script src="accounts.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,7 +1,11 @@
-const socket = io();
+// The token rides along on the handshake so the server knows which account
+// this socket belongs to before the first event arrives.
+const socket = io({ auth: { token: Accounts.getToken() } });
 
 const screens = {
   lobby: document.getElementById('screen-lobby'),
+  auth: document.getElementById('screen-auth'),
+  board: document.getElementById('screen-board'),
   waiting: document.getElementById('screen-waiting'),
   game: document.getElementById('screen-game'),
   over: document.getElementById('screen-over'),
@@ -24,6 +28,18 @@ btnMute.addEventListener('click', () => {
 });
 // Audio can only start from a user gesture; any lobby tap counts.
 document.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
+
+// Signing in or out changes who the server thinks we are, and the handshake
+// only happens once — so reconnect to carry the new token.
+Accounts.onChange((player) => {
+  socket.auth = { token: Accounts.getToken() };
+  if (player && !nameInput.value.trim()) nameInput.value = player.displayName;
+  if (socket.connected) {
+    socket.disconnect();
+    socket.connect();
+  }
+});
+Accounts.init();
 
 const nameInput = document.getElementById('nameInput');
 const codeInput = document.getElementById('codeInput');
@@ -190,16 +206,50 @@ socket.on('connect', () => {
   mySocketId = socket.id;
 });
 
-socket.on('matched', ({ opponentName, maxRounds: mr }) => {
+socket.on('matched', ({ opponentName, myName: serverName, maxRounds: mr }) => {
   oppName = opponentName;
   maxRounds = mr;
-  const myName = nameInput.value.trim() || 'Sen';
+  h2hBanner.classList.add('hidden');
+  overH2h.classList.add('hidden');
+  overStats.classList.add('hidden');
+  // A signed-in player is named by their account, so the scoreboard and the
+  // leaderboard always agree.
+  const myName = serverName || nameInput.value.trim() || 'Sen';
   document.getElementById('myName').textContent = myName;
   document.getElementById('oppName').textContent = oppName;
   document.getElementById('myAvatar').textContent = myName.charAt(0).toUpperCase();
   document.getElementById('oppAvatar').textContent = (oppName || 'R').charAt(0).toUpperCase();
   roundPips.innerHTML = '';
   showScreen('game');
+});
+
+const h2hBanner = document.getElementById('h2hBanner');
+const overH2h = document.getElementById('overH2h');
+const overStats = document.getElementById('overStats');
+
+// "Aranızda 3-1 öndesin" — the running series, only ever sent when both
+// players are signed in and have met before.
+socket.on('headToHead', ({ games, myWins, theirWins, draws }) => {
+  const lead = myWins > theirWins ? 'öndesin'
+    : myWins < theirWins ? 'gerideysin'
+    : 'berabersiniz';
+  const drawNote = draws ? ` · ${draws} beraberlik` : '';
+  const text = `Aranızda ${games} maç · ${myWins}-${theirWins} ${lead}${drawNote}`;
+  for (const el of [h2hBanner, overH2h]) {
+    el.textContent = text;
+    el.classList.remove('hidden');
+  }
+});
+
+// Sent right after a recorded game, so the new standing is visible without
+// having to open the leaderboard.
+socket.on('statsUpdate', ({ me }) => {
+  if (!me) return;
+  Accounts.setMe(me);
+  overStats.textContent = `${me.points} puan · ${me.wins}G ${me.draws}B ${me.losses}M`
+    + ` · ${me.tier ? me.tier.label : ''}${me.rank ? ` · #${me.rank}` : ''}`;
+  overStats.classList.remove('hidden');
+  if (me.tier) overStats.style.color = me.tier.color;
 });
 
 function hideAllPhases() {

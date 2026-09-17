@@ -465,3 +465,190 @@ body::before {
   .vs-panel { padding: 16px 18px; }
   .verdict-mark { width: 62px; height: 62px; font-size: 31px; }
 }
+
+/* --- accounts, leaderboard, ranks ---------------------------------------- */
+
+.btn-inline { padding: 0; font-size: 0.72rem; }
+
+.lobby-links {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  margin-top: 4px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--condensed);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Tier colour is set inline from the server, so the palette lives in one
+   place and the legend can never drift from the badges. */
+.activity-badge { color: var(--muted); }
+
+.account-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+
+.account-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.account-avatar {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface-2);
+  font-family: var(--display);
+  font-size: 1rem;
+}
+
+.account-id { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.account-name { font-weight: 800; font-size: 0.95rem; }
+
+.account-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.stat { display: flex; flex-direction: column; align-items: center; }
+.stat b { font-family: var(--display); font-size: 1.05rem; line-height: 1.1; }
+.stat i {
+  font-style: normal;
+  font-family: var(--condensed);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.stat-w b, b.stat-w { color: var(--green); }
+.stat-d b, b.stat-d { color: var(--muted); }
+.stat-l b, b.stat-l { color: var(--red); }
+
+.account-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.account-rank { font-family: var(--condensed); font-size: 0.75rem; color: var(--muted); }
+
+.panel {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 0;
+}
+.panel-wide { max-width: 520px; }
+.panel-title { font-family: var(--display); font-size: 1.6rem; text-align: center; }
+.panel-note { font-size: 0.78rem; color: var(--muted); text-align: center; }
+
+.tabs { display: flex; gap: 8px; }
+.tab {
+  flex: 1;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--condensed);
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.tab.active { color: var(--white); border-color: var(--accent); background: var(--surface-2); }
+
+.board-list { display: flex; flex-direction: column; gap: 6px; }
+
+.board-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface);
+  /* The tier colour runs down the edge of the row, so the standing is
+     readable at a glance without reading any label. */
+  border-left: 3px solid var(--tier-color, var(--border));
+  border-radius: 10px;
+}
+.board-row.is-me { background: var(--surface-2); outline: 1px solid var(--accent); }
+.board-row.podium .board-rank { font-size: 1.25rem; }
+
+.board-rank {
+  width: 30px;
+  flex: none;
+  text-align: center;
+  font-family: var(--display);
+  font-size: 1rem;
+  color: var(--muted);
+}
+.board-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.board-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-sub { display: flex; gap: 5px; flex-wrap: wrap; }
+.board-nums { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.board-points { font-family: var(--display); font-size: 1.1rem; }
+.board-points i { font-style: normal; font-size: 0.65rem; color: var(--muted); }
+.board-wdl { font-family: var(--condensed); font-size: 0.8rem; color: var(--muted); }
+.board-avg { font-family: var(--condensed); font-size: 0.68rem; color: var(--muted); }
+
+.tier-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+}
+
+.h2h-banner {
+  margin: 8px auto 0;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-family: var(--condensed);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-align: center;
+}
+
+.over-stats {
+  margin-top: 10px;
+  font-family: var(--condensed);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+}
+
+.legend-key { color: var(--white); font-weight: 600; }

@@ -12,6 +12,37 @@
 5. 5 round sonunda en çok puanı alan kazanır.
 6. Oyun bitince iki oyuncu da "Rövanş" derse aynı rakiple yeni oyun başlar.
 
+## Hesap, puantaj ve lider tablosu
+
+Kayıt olmak zorunlu değil — misafir olarak her şey eskisi gibi oynanır. Ama
+kayıtlı iki oyuncunun oynadığı her maç kaydedilir ve lider tablosuna işlenir.
+
+- **Puan:** galibiyet 3, beraberlik 1, mağlubiyet 0.
+- **Kademe** (puana göre, kendi rengiyle): Bronz 0+, Gümüş 20+, Altın 50+,
+  Platin 100+, Elit 200+.
+- **Rütbe** (oynama sıklığına göre, kazanmaktan bağımsız): Çaylak 0+,
+  Düzenli 10+, Müdavim 30+, Efsane 100+.
+- **Rozet:** ilk üç sıra 🥇🥈🥉 ile işaretlenir.
+- Tabloda her oyuncunun galibiyet/beraberlik/mağlubiyet sayısı ve maç başına
+  ortalama puanı yan yana durur — ortalamanın neye dayandığı görünsün diye.
+- Daha önce karşılaşmış iki kayıtlı oyuncu eşleştiğinde, maç başlamadan
+  aralarındaki seri gösterilir: "Aranızda 4 maç · 3-1 öndesin".
+
+İstatistikler sayaç olarak tutulmaz; her seferinde maç geçmişinden hesaplanır,
+bu yüzden geçmişle çelişmesi mümkün değil.
+
+### Kurulum (Postgres)
+
+Render'ın ücretsiz planında kalıcı disk yok, bu yüzden hesaplar harici bir
+Postgres'te durur (Neon'un ücretsiz planı fazlasıyla yeter):
+
+1. [neon.com](https://neon.com) üzerinden ücretsiz bir proje aç.
+2. Verdiği bağlantı adresini (`postgres://...`) kopyala.
+3. Render'da servisin **Environment** sekmesine `DATABASE_URL` adıyla ekle.
+
+Tablolar ilk açılışta kendiliğinden oluşur. `DATABASE_URL` tanımlı değilse
+hesap sistemi tamamen kapalı kalır ve oyun eskisi gibi çalışır.
+
 ## Kurulum
 
 ```bash
@@ -28,6 +59,9 @@ Sunucu `http://localhost:3000` adresinde çalışır.
   - **İfade rütbesi (statement rank).** `wdt:P54` yalnızca "truthy" (en yüksek rütbeli) ifadeleri döndürür. Bir editör futbolcunun *güncel* kulübünü "preferred" rütbeyle işaretlediği anda, o futbolcunun geçmiş kulüplerinin tamamı `wdt:` sonuçlarından kaybolur — yeni transfer olmuş bir oyuncu sanki tek kulüpte oynamış gibi görünür (Lukaku/McTominay → Napoli, Openda → Juventus bu yüzden reddediliyordu). Bu yüzden sorgu `p:P54/ps:P54` ile ifade düğümünden geçer ve rütbeden bağımsız olarak tüm kariyeri döndürür.
 - `server/gameLogic.js` — Önceden çekilmiş oyuncu listesine karşı eşleştirme: normalize (Türkçe karakter dahil), Wikidata takma adları, yazım hatası toleransı (Levenshtein) ve sadece soyisim yazma ("Muriqi") desteği.
 - `server/data/teams.js` — Takım adı/alias normalizasyonu (Türkçe karakter desteği dahil). Bu liste artık yalnızca bir **hızlı yol**: sık kullanılan kısaltmaları ("Man United", "GS") anında çözer. Listede olmayan bir takım yazılırsa (Deportivo, Leganés gibi) ya da Türkçe adı kullanılırsa ("Marsilya"), isim canlı olarak Wikidata'da aranır — hem İngilizce hem Türkçe etiketlerde. Yani takım adları da artık elle tutulan bir listeye bağlı değil.
+- `server/db.js` — Postgres bağlantısı ve şema. `DATABASE_URL` yoksa temiz şekilde devre dışı kalır.
+- `server/accounts.js` — Kayıt/giriş (scrypt ile şifre özeti), oturum jetonları, puantaj, kademe/rütbe hesabı ve kafa kafaya seri.
+- `public/accounts.js` — Hesap ekranı, hesap kartı ve lider tablosu. Oyun döngüsüne hiç dokunmaz: soket üzerinden değil HTTP üzerinden konuşur, tek ortak nokta oturum jetonudur.
 - `public/` — Tek sayfalık istemci (vanilla JS + Socket.io client).
 
 ## Kadro anlık görüntüsü (neden var?)

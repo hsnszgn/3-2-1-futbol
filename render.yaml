@@ -11,3 +11,9 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 20.11.0
+      # Accounts, stats and the leaderboard. Render's free tier has no
+      # persistent disk, so this points at an external Postgres (Neon's free
+      # tier is enough). Left unset, the game runs exactly as before with
+      # accounts switched off.
+      - key: DATABASE_URL
+        sync: false
