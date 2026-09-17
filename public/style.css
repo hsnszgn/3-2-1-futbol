@@ -402,6 +402,9 @@ body::before {
 .over-box { text-align: center; display: flex; flex-direction: column; gap: 10px; }
 #overTitle { font-family: var(--display); font-size: clamp(38px, 12vw, 56px); text-transform: uppercase; line-height: 1; }
 .over-score { font-family: var(--display); font-size: 40px; color: var(--accent); letter-spacing: 0.06em; }
+.over-actions { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.over-actions .status-line { color: var(--muted); }
+.over-actions .status-line.wants { color: var(--accent); font-weight: 700; }
 
 @media (max-height: 680px) {
   .countdown { font-size: 34vw; }

@@ -7,6 +7,7 @@ const { randomUUID } = require('crypto');
 const { resolveTeam, normalize } = require('./data/teams');
 const { matchPlayerName } = require('./gameLogic');
 const { getCommonPlayers, resolveTeamByName, prefetchSquad } = require('./wikidata');
+const squadStore = require('./squadStore');
 
 // The local alias list handles the common cases instantly ("Man United",
 // "GS"); anything it doesn't know — a club nobody added, or a Turkish name
@@ -29,12 +30,19 @@ const RECONNECT_GRACE_MS = 12000;
 const app = express();
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// Diagnostics for the Wikidata lookup, e.g.
+// Did the deploy-time squad build actually produce anything? Answers that in
+// one look, without having to read build logs.
+app.get('/debug/snapshot', (req, res) => {
+  res.json(squadStore.info());
+});
+
+// Diagnostics for a single matchup, e.g.
 //   /debug/lookup?a=Inter Milan&b=AC Milan
 //   /debug/lookup?a=Fenerbahce&b=Lazio&guess=Vedat Muriqi
-// Shows which Wikidata items each club name resolved to and what the common
-// player list actually contains, so a "that player should have counted" report
-// can be checked against real data instead of guessed at.
+// Shows whether the answer came from the shipped snapshot or a live lookup,
+// which Wikidata items each club name resolved to, and what the common player
+// list actually contains — so a "that player should have counted" report can
+// be checked against real data instead of guessed at.
 app.get('/debug/lookup', async (req, res) => {
   const [teamA, teamB] = await Promise.all([
     resolveTeamInput(req.query.a),
@@ -101,6 +109,7 @@ function createRoom(socketA, socketB) {
     state: 'idle',
     teamSubs: {},
     playerGuessResolved: false,
+    rematchRequests: new Set(),
     timer: null,
   };
   rooms.set(roomId, room);
@@ -229,6 +238,7 @@ function scoresForClient(room) {
 function endGame(room) {
   clearTimer(room);
   room.state = 'game-over';
+  room.rematchRequests.clear();
   const [a, b] = room.players;
   const scoreA = room.scores[a.socketId] || 0;
   const scoreB = room.scores[b.socketId] || 0;
@@ -390,6 +400,28 @@ io.on('connection', (socket) => {
     } else {
       room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
     }
+  });
+
+  // "Bir daha!" is the natural reflex after a game — keep the pair together
+  // instead of sending them back to the lobby to re-match from scratch.
+  socket.on('requestRematch', () => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.state !== 'game-over') return;
+
+    room.rematchRequests.add(socket.id);
+    const ids = room.players.map((p) => p.socketId);
+
+    if (ids.every((id) => room.rematchRequests.has(id))) {
+      room.rematchRequests.clear();
+      room.round = 0;
+      for (const id of ids) room.scores[id] = 0;
+      io.to(room.id).emit('rematchStarting');
+      startRound(room);
+      return;
+    }
+
+    socket.emit('rematchWaiting');
+    socket.to(room.id).emit('opponentWantsRematch');
   });
 
   socket.on('leaveRoom', () => cleanupSocket(socket));

@@ -14,6 +14,7 @@
 // so irrelevant candidates simply contribute no rows.
 
 const { normalize } = require('./data/teams');
+const squadStore = require('./squadStore');
 
 const SEARCH_ENDPOINT = 'https://www.wikidata.org/w/api.php';
 const SPARQL_ENDPOINT = 'https://query.wikidata.org/sparql';
@@ -217,13 +218,16 @@ async function fetchPlayerNames(playerUris, deadline) {
     const aliases = row.playerAltLabel && row.playerAltLabel.value
       ? row.playerAltLabel.value.split(',').map((s) => s.trim()).filter(Boolean)
       : [];
-    if (!byQid.has(uri)) byQid.set(uri, { name: label, aliases });
+    // Carry the qid: results come back in the label service's order, not the
+    // order asked for, so callers can't line them up positionally.
+    if (!byQid.has(uri)) byQid.set(uri, { qid: qidOf(uri), name: label, aliases });
   }
   return [...byQid.values()];
 }
 
 /** Warms one club's squad cache, so the reveal doesn't have to wait for it. */
 async function prefetchSquad(team) {
+  if (squadStore.has(team.id)) return; // already shipped in the snapshot
   try {
     const deadline = Date.now() + LOOKUP_BUDGET_MS;
     const candidates = await resolveTeamCandidates(team.display, deadline, team.qid);
@@ -242,6 +246,17 @@ async function getCommonPlayers(teamA, teamB) {
   const startedAt = Date.now();
   const deadline = startedAt + LOOKUP_BUDGET_MS;
   const debug = { teamA: teamA.display, teamB: teamB.display };
+
+  // Both clubs in the shipped snapshot: answer from memory, no network at all.
+  const offline = squadStore.commonPlayers(teamA.id, teamB.id);
+  if (offline) {
+    debug.source = 'snapshot';
+    debug.playerCount = offline.length;
+    debug.elapsedMs = Date.now() - startedAt;
+    return { ok: true, players: offline, debug };
+  }
+  debug.source = 'live';
+
   try {
     const [candA, candB] = await Promise.all([
       resolveTeamCandidates(teamA.display, deadline, teamA.qid),
@@ -277,4 +292,12 @@ async function getCommonPlayers(teamA, teamB) {
   }
 }
 
-module.exports = { getCommonPlayers, resolveTeamByName, prefetchSquad };
+module.exports = {
+  getCommonPlayers,
+  resolveTeamByName,
+  prefetchSquad,
+  // Used by scripts/build-squads.js to generate the shipped snapshot.
+  resolveTeamCandidates,
+  fetchSquadQids,
+  fetchPlayerNames,
+};

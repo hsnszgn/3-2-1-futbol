@@ -406,6 +406,8 @@ function updateScores(scores) {
 socket.on('gameOver', ({ scores, winnerSocketId }) => {
   updateScores(scores);
   showScreen('over');
+  document.getElementById('btnRematch').disabled = false;
+  document.getElementById('rematchStatus').textContent = '';
   const title = document.getElementById('overTitle');
   const overScore = document.getElementById('overScore');
   const oppId = Object.keys(scores).find((id) => id !== mySocketId);
@@ -421,6 +423,7 @@ socket.on('gameOver', ({ scores, winnerSocketId }) => {
 
 socket.on('opponentLeft', () => {
   showScreen('lobby');
+  document.getElementById('rematchStatus').textContent = '';
   lobbyStatus.textContent = 'Rakip bağlantıyı kopardı.';
 });
 
@@ -446,7 +449,36 @@ socket.io.on('reconnect', () => {
   }
 });
 
-document.getElementById('btnRematch').addEventListener('click', () => {
+const btnRematch = document.getElementById('btnRematch');
+const rematchStatus = document.getElementById('rematchStatus');
+
+btnRematch.addEventListener('click', () => {
+  btnRematch.disabled = true;
+  rematchStatus.textContent = 'Rakip bekleniyor...';
+  rematchStatus.className = 'status-line';
+  socket.emit('requestRematch');
+});
+
+document.getElementById('btnBackToLobby').addEventListener('click', () => {
+  socket.emit('leaveRoom');
   showScreen('lobby');
   lobbyStatus.textContent = '';
+});
+
+socket.on('rematchWaiting', () => {
+  rematchStatus.textContent = 'Rakip bekleniyor...';
+  rematchStatus.className = 'status-line';
+});
+
+socket.on('opponentWantsRematch', () => {
+  rematchStatus.textContent = `${oppName} rövanş istiyor!`;
+  rematchStatus.className = 'status-line wants';
+  buzz(20);
+});
+
+socket.on('rematchStarting', () => {
+  btnRematch.disabled = false;
+  rematchStatus.textContent = '';
+  roundPips.innerHTML = '';
+  showScreen('game');
 });

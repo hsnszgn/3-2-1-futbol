@@ -3,7 +3,10 @@ services:
     name: 3-2-1-futbol
     env: node
     plan: free
-    buildCommand: npm install
+    # The squad snapshot is built here, where there is internet and no round
+    # waiting on it. It never fails the deploy: without it the server just
+    # falls back to live Wikidata lookups.
+    buildCommand: npm install && npm run build:squads
     startCommand: npm start
     envVars:
       - key: NODE_VERSION

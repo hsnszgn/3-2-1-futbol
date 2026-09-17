@@ -8,6 +8,7 @@
 3. İki oyuncu da takımını gönderince takımlar karşılıklı açıklanır.
 4. Her iki takımda da oynamış bir futbolcunun adını ilk doğru yazan turu kazanır.
 5. 5 round sonunda en çok puanı alan kazanır.
+6. Oyun bitince iki oyuncu da "Rövanş" derse aynı rakiple yeni oyun başlar.
 
 ## Kurulum
 
@@ -26,6 +27,23 @@ Sunucu `http://localhost:3000` adresinde çalışır.
 - `server/gameLogic.js` — Önceden çekilmiş oyuncu listesine karşı eşleştirme: normalize (Türkçe karakter dahil), Wikidata takma adları, yazım hatası toleransı (Levenshtein) ve sadece soyisim yazma ("Muriqi") desteği.
 - `server/data/teams.js` — Takım adı/alias normalizasyonu (Türkçe karakter desteği dahil). Bu liste artık yalnızca bir **hızlı yol**: sık kullanılan kısaltmaları ("Man United", "GS") anında çözer. Listede olmayan bir takım yazılırsa (Deportivo, Leganés gibi) ya da Türkçe adı kullanılırsa ("Marsilya"), isim canlı olarak Wikidata'da aranır — hem İngilizce hem Türkçe etiketlerde. Yani takım adları da artık elle tutulan bir listeye bağlı değil.
 - `public/` — Tek sayfalık istemci (vanilla JS + Socket.io client).
+
+## Kadro anlık görüntüsü (neden var?)
+
+Bir round'un ortasında ağ beklemek, oyunun en kırılgan yeriydi: doğru bir
+cevabın reddedilmesi çoğu zaman oyuncunun değil, yavaş veya hata veren bir
+sorgunun suçuydu. Bu yüzden `scripts/build-squads.js`, **deploy sırasında**
+(Render'ın `buildCommand`'ında) yerel listedeki her kulüp için "kim burada
+oynadı" verisini çekip `server/data/squads.json` dosyasına yazar.
+
+Sunucu açılışta bu dosyayı belleğe alır; bilinen iki kulüp arasındaki her
+eşleşme artık **hiç ağa çıkmadan, milisaniyede** yanıtlanır. Listede olmayan
+kulüpler (ve dosya hiç üretilememişse her şey) eskisi gibi canlı Wikidata
+sorgusuna düşer — yani bu bir hızlandırma, bir bağımlılık değil.
+
+Anlık görüntü depoya işlenmez (`.gitignore`), her deploy'da yeniden üretilir.
+Yerelde denemek için: `npm run build:squads`.
+Durumunu görmek için: `/debug/snapshot`
 
 ## Teşhis (bir oyuncu/takım neden kabul edilmedi?)
 
