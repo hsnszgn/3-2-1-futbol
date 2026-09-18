@@ -18,7 +18,11 @@ const ROOT = path.join(__dirname, '..');
  * @param {object} [env] extra environment variables for the child.
  */
 async function startTestServer(env = {}) {
-  const port = 4000 + Math.floor(Math.random() * 1000);
+  // Port 0 means "whatever is free"; the fixture reports the port it actually
+  // got. Picking a random number here used to collide with another test server
+  // and surface as "server did not come up", which looks like a flaky test but
+  // is really a broken harness.
+  const requestedPort = env.PORT || '0';
 
   // Inheriting the caller's environment would hand the test server whatever
   // DATABASE_URL happens to be exported — including a production one. The
@@ -36,7 +40,7 @@ async function startTestServer(env = {}) {
       // absent key would let a parent shell value creep back in via any layer
       // that merges environments.
       DATABASE_URL: env.DATABASE_URL || '',
-      PORT: String(port),
+      PORT: String(requestedPort),
       NODE_ENV: env.NODE_ENV || 'test',
       // Limits exist to stop abuse, not to stop tests; each test drives one
       // client hard from a single address.
@@ -50,6 +54,12 @@ async function startTestServer(env = {}) {
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
 
+  const portReady = new Promise((resolve) => {
+    child.on('message', (msg) => {
+      if (msg && msg.type === 'listening') resolve(msg.port);
+    });
+  });
+
   let exited = false;
   let exitInfo = null;
   child.on('exit', (code, signal) => {
@@ -61,6 +71,10 @@ async function startTestServer(env = {}) {
   child.stdout.on('data', (d) => logs.push(String(d)));
   child.stderr.on('data', (d) => logs.push(String(d)));
 
+  const port = await Promise.race([
+    portReady,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('server never reported a port')), 15000)),
+  ]);
   const url = `http://127.0.0.1:${port}`;
   await waitForHttp(`${url}/healthz`, 10000, () => exited);
 
@@ -93,12 +107,22 @@ async function waitForHttp(url, timeoutMs, hasExited) {
   }
 }
 
-function connectClient(url, auth) {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.reconnection] keep the client alive across a
+ *   dropped transport, so Socket.IO connection state recovery can be exercised.
+ * @param {number} [options.reconnectionDelay] how long the client stays away
+ *   before coming back. Tests that need the server to actually sit in its
+ *   "waiting for the host" path have to keep the host away long enough for
+ *   requests to pile up behind it.
+ */
+function connectClient(url, auth, options = {}) {
   return new Promise((resolve, reject) => {
     const socket = io(url, {
       transports: ['websocket'],
       forceNew: true,
-      reconnection: false,
+      reconnection: Boolean(options.reconnection),
+      reconnectionDelay: options.reconnectionDelay || 50,
       auth: auth || {},
     });
     const timer = setTimeout(() => reject(new Error('socket did not connect')), 8000);

@@ -35,13 +35,28 @@ testler ATLANIR ve atlandıkları açıkça yazılır — geçmiş sayılmazlar.
 TEST_DATABASE_URL=postgres://... npm run test:browser
 ```
 
+**Tarayıcı testlerinin kurulumu.** `playwright` bilerek `package.json`'a
+eklenmedi: üretim imajının test tarayıcısı indirmesine gerek yok. Kurulum ve
+doğrulanmış sürümler:
+
+```bash
+npm i --no-save playwright@1.56.1
+npx playwright install chromium          # veya CHROMIUM_PATH ile hazır tarayıcı
+CHROMIUM_PATH=/opt/pw-browsers/chromium npm run test:browser
+```
+
+Bu depodaki sonuçlar **Playwright 1.56.1 + Chromium 141.0.7390.37** ile alındı.
+Koşucu her çalıştırmada kullandığı sürümleri ve veritabanının bağlı olup
+olmadığını başlıkta yazar, sonucu da "veritabanısız" ve "izole PostgreSQL"
+koşusu olarak ayrı raporlar.
+
 | Test | Ne kanıtlıyor | DB |
 |---|---|---|
-| `socket-payloads` | 7 olaya 26 bozuk payload; her biri handler'a ulaşıyor (reddetme yanıtlarıyla kanıtlı), sunucu ayakta; 16 KB üstü payload sadece o bağlantıyı kapatıyor; oyun içi bozuk mesajlardan sonra tur normal tamamlanıyor | — |
+| `socket-payloads` | 26 bozuk payload × 7 olay. Yanıt veren 4 olayda (`joinQueue`, `createPrivateRoom`, `joinPrivateRoom`, oyun sonu `requestRematch`) teslim **sunucu yanıtları sayılarak** ölçülüyor; yanıt vermeyen 4 olayda kanıt yalnızca "bağlantı ayakta kaldı ve sonrasında çalıştı" (bunlar oyun içi bölümde reddetme yanıtlarıyla ayrıca kanıtlanıyor). 16 KB üstü payload **sadece** o bağlantıyı kapatıyor — kapanmazsa test başarısız olur — ve o sırada oynanan maç etkilenmiyor | — |
 | `room-integrity` | Tekrarlı `joinQueue` tek maç; kendi davetine katılma reddi; tekrar davet aynı kodu döner | — |
 | `double-match` | Davet kabulü kuyruğu temizler; oyundaki oyuncu tekrar eşleşmez; başarılı katılım hata yaymaz; geçersiz kod sırayı düşürmez | — |
 | `browser/full-match` | 5 tur + tur sayacı sınırı + rövanş | — |
-| `browser/speed-scoring` | Hız kademeleri ve kaybedene gösterilen mesaj | — |
+| `browser/speed-scoring` | **Yalnızca** en hızlı kademe (+3) ve kaybedene gösterilen mesaj. +2/+1 kademeleri ile puanın Wikidata gecikmesinden bağımsızlığı doğrulanmadı | — |
 | `browser/invite` | Davet linkiyle katılma akışı | — |
 | `browser/void-round` | Ortak oyuncu yoksa tur geçersiz ve tekrarlanır | — |
 | `browser/account-rights` | Hesap silme/dışa aktarma; silme rakibin geçmişini bozmaz | ✓ |

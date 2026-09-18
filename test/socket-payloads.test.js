@@ -49,29 +49,58 @@ const HOSTILE = [
 ];
 
 /**
- * Each event is paired with a message that must still work afterwards, and the
- * reply that proves the server handled it.
+ * Events split into two honest groups.
+ *
+ * `replies` events answer every message, so the number of replies received is a
+ * direct, server-side measure of how many hostile payloads were processed.
+ *
+ * `silent` events are no-ops outside a game and answer nothing, so delivery
+ * cannot be observed from the client. For those the claim is narrower: the
+ * connection survives and still round-trips. They ARE proven delivered in the
+ * in-game section below, where they do reply.
  */
-const EVENTS = [
-  { event: 'joinQueue', probe: { name: 'Prob' }, expect: 'waiting' },
-  { event: 'createPrivateRoom', probe: { name: 'Prob' }, expect: 'privateRoomCreated' },
-  { event: 'joinPrivateRoom', probe: { name: 'Prob', code: 'YOKBOYLE' }, expect: 'errorMessage' },
-  // These three are no-ops outside a game; the in-game test below drives them
-  // in the state where they actually do something.
-  { event: 'submitTeam', probe: { name: 'Prob' }, expect: null },
-  { event: 'submitGuess', probe: { name: 'Prob' }, expect: null },
-  { event: 'requestRematch', probe: {}, expect: null },
-  { event: 'leaveRoom', probe: {}, expect: null },
+const REPLYING_EVENTS = [
+  { event: 'joinQueue', reply: 'waiting' },
+  { event: 'createPrivateRoom', reply: 'privateRoomCreated' },
+  { event: 'joinPrivateRoom', reply: 'errorMessage', extra: { code: 'YOKBOYLE' } },
 ];
+
+const SILENT_EVENTS = ['submitTeam', 'submitGuess', 'requestRematch', 'leaveRoom'];
 
 module.exports = async function run() {
   const server = await startTestServer();
   const notes = [];
 
   try {
-    // --- 1. small hostile payloads reach their handler and are survived -----
-    let delivered = 0;
-    for (const { event, probe, expect } of EVENTS) {
+    // --- 1a. events that reply: delivery is counted, not assumed ------------
+    let measured = 0;
+    for (const { event, reply, extra } of REPLYING_EVENTS) {
+      const socket = await connectClient(server.url);
+      let dropped = false;
+      socket.on('disconnect', () => { dropped = true; });
+
+      // Count the server's answers. Each hostile payload normalises to an
+      // object the handler still acts on, so one reply per payload is the
+      // server telling us it processed that message.
+      let replies = 0;
+      socket.on(reply, () => { replies += 1; });
+
+      for (const payload of HOSTILE) {
+        socket.emit(event, extra ? { ...(payload && typeof payload === 'object' ? payload : {}), ...extra } : payload);
+      }
+      await sleep(600);
+
+      assert.ok(!dropped, `connection was closed by hostile "${event}" payloads`);
+      assert.strictEqual(replies, HOSTILE.length,
+        `"${event}": server answered ${replies} of ${HOSTILE.length} hostile payloads`);
+      measured += replies;
+      socket.close();
+    }
+
+    // --- 1b. events that answer nothing outside a game ---------------------
+    // Delivery is not observable here, so the claim stops at: the connection
+    // survives and still works afterwards.
+    for (const event of SILENT_EVENTS) {
       const socket = await connectClient(server.url);
       let dropped = false;
       socket.on('disconnect', () => { dropped = true; });
@@ -80,45 +109,50 @@ module.exports = async function run() {
       await sleep(200);
 
       assert.ok(!dropped, `connection was closed by hostile "${event}" payloads`);
-      assert.ok(socket.connected, `socket died sending hostile "${event}" payloads`);
-      delivered += HOSTILE.length;
-
-      // The proof that the channel is still live and the server still listening.
-      if (expect) {
-        const reply = waitFor(socket, expect, 6000);
-        socket.emit(event, probe);
-        await reply;
-      } else {
-        // No reply to assert on, so verify the connection still round-trips.
-        const reply = waitFor(socket, 'waiting', 6000);
-        socket.emit(event, probe);
-        socket.emit('joinQueue', { name: 'Prob' });
-        await reply;
-      }
-
+      const reply = waitFor(socket, 'waiting', 6000);
+      socket.emit('joinQueue', { name: 'Prob' });
+      await reply;
       socket.close();
     }
+
     assert.ok(server.isAlive(), 'server died during the hostile payload sweep');
-    notes.push(`${EVENTS.length} olay × ${HOSTILE.length} bozuk payload = ${delivered} mesaj teslim edildi, her olayda sonrasında normal yanıt alındı`);
+    notes.push(`${measured} mesaj sunucu yanıtıyla ölçülerek teslim edildi (${REPLYING_EVENTS.length} olay); yanıt vermeyen ${SILENT_EVENTS.length} olayda bağlantı ayakta kaldı ve sonrasında çalıştı`);
 
     // --- 2. an oversized payload closes that ONE socket, nothing else -------
     {
+      // A game already in progress, so the blast radius is measured against a
+      // live match rather than against a client that connects afterwards.
+      const [x, y] = await Promise.all([connectClient(server.url), connectClient(server.url)]);
+      const bothMatched = Promise.all([waitFor(x, 'matched', 8000), waitFor(y, 'matched', 8000)]);
+      x.emit('joinQueue', { name: 'Devam' });
+      y.emit('joinQueue', { name: 'Eden' });
+      await bothMatched;
+      await waitFor(x, 'openTeamSubmit', 12000);
+
       const victim = await connectClient(server.url);
-      const closed = new Promise((resolve) => victim.on('disconnect', resolve));
+      let victimDropped = false;
+      victim.on('disconnect', () => { victimDropped = true; });
       // Comfortably over the 16 KiB frame limit.
       victim.emit('joinQueue', { name: 'x'.repeat(100000) });
-      await Promise.race([closed, sleep(3000)]);
 
+      const deadline = Date.now() + 5000;
+      while (!victimDropped && Date.now() < deadline) await sleep(100);
+      assert.ok(victimDropped,
+        'an oversized payload must close that connection; it stayed open');
       assert.ok(server.isAlive(), 'an oversized payload killed the server');
-      notes.push(`100 KB payload: bağlantı kapandı (${victim.connected ? 'hâlâ açık' : 'kapandı'}), sunucu ayakta`);
       victim.close();
 
-      // Another player is completely unaffected.
-      const bystander = await connectClient(server.url);
-      const waiting = waitFor(bystander, 'waiting', 6000);
-      bystander.emit('joinQueue', { name: 'Seyirci' });
-      await waiting;
-      bystander.close();
+      // The match that was already running is untouched and still playable.
+      assert.ok(x.connected && y.connected, 'the in-progress match lost a connection');
+      const acceptedX = waitFor(x, 'teamAccepted', 8000);
+      const acceptedY = waitFor(y, 'teamAccepted', 8000);
+      x.emit('submitTeam', { team: 'Chelsea' });
+      y.emit('submitTeam', { team: 'Liverpool' });
+      await Promise.all([acceptedX, acceptedY]);
+
+      notes.push('100 KB payload: sadece o bağlantı kapandı, devam eden maç etkilenmedi');
+      x.close();
+      y.close();
     }
 
     // --- 3. hostile payloads inside a live game -----------------------------
@@ -182,13 +216,61 @@ module.exports = async function run() {
       const round = await result;
       assert.ok(round && round.playerName, 'the round should still resolve after hostile guesses');
 
-      for (const payload of HOSTILE) a.emit('requestRematch', payload);
-      await sleep(200);
-      assert.ok(server.isAlive(), 'hostile requestRematch killed the server');
-
       notes.push(`oyun içi: ${rejections.length} takım reddi + ${guessRejections.length} tahmin reddi (teslim kanıtı), sonraki tur normal tamamlandı ("${round.playerName}")`);
       a.close();
       b.close();
+    }
+
+    // --- 4. hostile rematch requests in the game-over state ------------------
+    // requestRematch only does anything once the game is actually over, so
+    // firing it mid-game (as this test used to) proved nothing. A one-round
+    // server gets us to game-over cheaply, and there the handler answers every
+    // request with rematchWaiting — so delivery is measured, not assumed.
+    {
+      const shortGame = await startTestServer({ MAX_ROUNDS: '1' });
+      try {
+        const [a, b] = await Promise.all([
+          connectClient(shortGame.url), connectClient(shortGame.url),
+        ]);
+
+        const over = Promise.all([waitFor(a, 'gameOver', 25000), waitFor(b, 'gameOver', 25000)]);
+        const matched = Promise.all([waitFor(a, 'matched', 8000), waitFor(b, 'matched', 8000)]);
+        a.emit('joinQueue', { name: 'Ali' });
+        b.emit('joinQueue', { name: 'Veli' });
+        await matched;
+
+        await waitFor(a, 'openTeamSubmit', 12000);
+        const accepted = Promise.all([waitFor(a, 'teamAccepted', 8000), waitFor(b, 'teamAccepted', 8000)]);
+        a.emit('submitTeam', { team: 'Chelsea' });
+        b.emit('submitTeam', { team: 'Liverpool' });
+        await accepted;
+
+        await waitFor(a, 'teamsRevealed', 15000);
+        a.emit('submitGuess', { guess: 'Mohamed Salah' });
+        await over;
+
+        let waitingReplies = 0;
+        a.on('rematchWaiting', () => { waitingReplies += 1; });
+        for (const payload of HOSTILE) a.emit('requestRematch', payload);
+        await sleep(600);
+
+        assert.ok(shortGame.isAlive(), 'hostile requestRematch killed the server');
+        assert.ok(a.connected && b.connected, 'hostile requestRematch dropped a connection');
+        assert.strictEqual(waitingReplies, HOSTILE.length,
+          `game-over requestRematch: ${waitingReplies} of ${HOSTILE.length} hostile payloads answered`);
+
+        // And a real rematch still starts, so the barrage did not corrupt the
+        // room's pending-request state.
+        const starting = waitFor(a, 'rematchStarting', 8000);
+        b.emit('requestRematch', {});
+        await starting;
+
+        notes.push(`oyun sonu: ${waitingReplies} bozuk rövanş isteği yanıtlandı, ardından gerçek rövanş başladı`);
+        a.close();
+        b.close();
+      } finally {
+        await shortGame.stop();
+      }
     }
 
     const health = await fetch(`${server.url}/healthz`);

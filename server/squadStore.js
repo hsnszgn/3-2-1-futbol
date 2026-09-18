@@ -11,7 +11,12 @@
 const fs = require('fs');
 const path = require('path');
 
-const SNAPSHOT_PATH = path.join(__dirname, 'data', 'squads.json');
+// The snapshot is gitignored and built at deploy time, so whether it exists is
+// a property of the machine, not of the code. Tests must not silently answer
+// from a stale local file instead of their own fixture, so they can point this
+// somewhere else — or nowhere.
+const SNAPSHOT_PATH = process.env.SQUAD_SNAPSHOT_PATH
+  || path.join(__dirname, 'data', 'squads.json');
 
 let squads = new Map(); // team id -> Set of player qids
 let names = new Map(); // player qid -> { name, aliases }

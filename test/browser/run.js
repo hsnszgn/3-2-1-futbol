@@ -68,8 +68,13 @@ async function main() {
     console.log('TEST_DATABASE_URL tanımlı değil — hesap testleri ATLANACAK (başarılı sayılmayacak).\n');
   }
 
+  // The setup has to be reproducible, so the run states which versions it
+  // actually used rather than leaving it to whatever prose accompanies it.
   const executablePath = process.env.CHROMIUM_PATH || undefined;
   const browser = await playwright.chromium.launch(executablePath ? { executablePath } : {});
+  console.log(`  Playwright ${require('playwright/package.json').version}`
+    + ` · Chromium ${browser.version()}`
+    + ` · veritabanı: ${TEST_DB ? 'izole PostgreSQL (TEST_DATABASE_URL)' : 'yok'}\n`);
   const results = [];
 
   for (const spec of specs) {
@@ -104,8 +109,16 @@ async function main() {
   const ran = results.filter((r) => !r.skipped);
   const failed = ran.filter((r) => !r.ok);
   const skipped = results.filter((r) => r.skipped);
-  console.log(`\n${ran.length - failed.length}/${ran.length} tarayıcı testi geçti`
-    + (skipped.length ? ` · ${skipped.length} atlandı (${skipped.map((s) => s.name).join(', ')})` : ''));
+  // DB-less and isolated-PostgreSQL runs are reported as separate results, not
+  // merged into one number: a suite that skipped the account specs has not
+  // verified them, and saying so is the whole point.
+  console.log(`\n${TEST_DB ? 'İzole PostgreSQL' : "Veritabanısız"} koşu:`
+    + ` ${ran.length - failed.length}/${ran.length} tarayıcı testi geçti`
+    + (skipped.length ? ` · ${skipped.length} ATLANDI, doğrulanmadı (${skipped.map((s) => s.name).join(', ')})` : ''));
+  if (!TEST_DB) {
+    console.log('Hesap/oturum senaryoları bu koşuda doğrulanmadı.'
+      + ' Tam sonuç için: TEST_DATABASE_URL=postgres://... npm run test:browser');
+  }
   if (failed.length) {
     console.log(`Kalanlar: ${failed.map((f) => f.name).join(', ')}`);
     process.exit(1);

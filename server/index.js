@@ -26,7 +26,9 @@ function sameTeam(a, b) {
 }
 
 const PORT = process.env.PORT || 3000;
-const MAX_ROUNDS = 5;
+// Five rounds is the game. It is configurable only so tests can reach the
+// end-game state (rematch, final score) without playing five full rounds.
+const MAX_ROUNDS = Number(process.env.MAX_ROUNDS) || 5;
 const TEAM_SUBMIT_MS = 12000;
 const PLAYER_GUESS_MS = 25000;
 const NEXT_ROUND_DELAY_MS = 3500;
@@ -471,6 +473,25 @@ function makeRoomCode() {
   return code;
 }
 
+/**
+ * Every intent to enter a match carries a version.
+ *
+ * Joining an invite waits for the host, which can take seconds. In that window
+ * the player may send a second join, queue instead, leave, or already be
+ * matched. When the wait finally ends, the request that is waking up has to
+ * know whether it still speaks for the player. Without this, a stale request
+ * would report "this room is full" to somebody it had just successfully put
+ * into a game — and the client turns any error into "back to the lobby".
+ *
+ * Anything that changes where a player is heading bumps the version, which
+ * silently retires every attempt started before it.
+ */
+function newJoinAttempt(socket) {
+  socket.data.joinAttempt = (socket.data.joinAttempt || 0) + 1;
+  return socket.data.joinAttempt;
+}
+const joinAttemptIsCurrent = (socket, attempt) => socket.data.joinAttempt === attempt;
+
 /** Still connected, and not already sitting in a live room. */
 function isAvailableForMatch(socket) {
   if (!socket || !socket.connected) return false;
@@ -510,7 +531,10 @@ function createRoom(socketA, socketB) {
   }
   if (!isAvailableForMatch(socketA) || !isAvailableForMatch(socketB)) return false;
 
-  // Commit both players before anything can await.
+  // Commit both players before anything can await, and retire any join
+  // attempt either of them still has in flight.
+  newJoinAttempt(socketA);
+  newJoinAttempt(socketB);
   removeFromQueue(socketA);
   removeFromQueue(socketB);
   dropPendingInvite(socketA);
@@ -801,6 +825,8 @@ io.on('connection', (socket) => {
       socket.emit('waiting');
       return;
     }
+    // Choosing the random queue retires any invite join still waiting.
+    newJoinAttempt(socket);
 
     // Pull opponents off the front until one is genuinely free. Someone who
     // left, or who joined a friend's invite while waiting here, is stale.
@@ -840,6 +866,8 @@ io.on('connection', (socket) => {
   onSocketEvent(socket, 'joinPrivateRoom', async ({ name, code }) => {
     const safeName = cleanText(name, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
     socket.data.name = safeName;
+    // A second join supersedes the first: the newest intent is the real one.
+    const attempt = newJoinAttempt(socket);
     const normalizedCode = cleanText(code, 12).toUpperCase();
     const entry = codeRooms.get(normalizedCode);
 
@@ -865,15 +893,18 @@ io.on('connection', (socket) => {
     // way back. Give them a moment before writing the invite off.
     const hostSocket = await waitForConnectedSocket(entry.hostSocketId, HOST_WAIT_MS);
 
-    // That wait can be seconds long. In the meantime the joiner may have been
-    // matched from the queue, the host may have started a game, or the invite
-    // may have been claimed by someone else — so everything is re-checked
-    // against the state as it is now, not as it was before the await.
+    // That wait can be seconds long, so everything is re-checked against the
+    // state as it is now. The version check comes FIRST and returns silently:
+    // if this attempt has been superseded — by a duplicate request, by the
+    // player queueing or leaving, or by the match this very player is already
+    // in — it must not speak at all. Reporting a failure here would eject a
+    // player from a game that succeeded.
+    if (!joinAttemptIsCurrent(socket, attempt)) return;
+    if (!isAvailableForMatch(socket)) return; // joiner already got a game
     if (codeRooms.get(normalizedCode) !== entry) {
       socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
       return;
     }
-    if (!isAvailableForMatch(socket)) return; // joiner already got a game
     if (!hostSocket) {
       codeRooms.delete(normalizedCode);
       socket.emit('errorMessage', { message: 'Oda sahibi çevrimdışı, yeni bir kod isteyin.' });
@@ -1046,6 +1077,13 @@ io.on('connection', (socket) => {
 });
 
 function cleanupSocket(socket, disconnected = false) {
+  // Leaving retires any pending join even when there is no room yet: a player
+  // who cancelled while waiting for an invite host must not be dropped into
+  // that game when the host finally reappears.
+  newJoinAttempt(socket);
+  removeFromQueue(socket);
+  dropPendingInvite(socket);
+
   const roomId = socket.data.roomId;
   if (!roomId) return;
   const room = rooms.get(roomId);
@@ -1085,7 +1123,10 @@ process.on('uncaughtException', (err) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`${brand.name} server listening on port ${PORT}`);
+  // Report the port actually bound, not the requested one: with PORT=0 the OS
+  // chooses, and logging the request would print a useless "0".
+  const bound = server.address();
+  console.log(`${brand.name} server listening on port ${bound ? bound.port : PORT}`);
   // Creating the tables is safe to repeat, and a failure here only disables
   // accounts — the game itself must still come up.
   db.migrate().then((ready) => {

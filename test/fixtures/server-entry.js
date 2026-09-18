@@ -5,6 +5,12 @@
  * timing, room bookkeeping — so the football lookup is mocked to keep them
  * fast and offline. Everything else is the production code path.
  */
+// A deploy-time squad snapshot may exist on the developer's machine. It is
+// gitignored, so its presence differs between checkouts — and squadStore
+// answers from it before the mock below is ever consulted. Pointing the path
+// at a file that cannot exist makes the fixture the only source of truth.
+process.env.SQUAD_SNAPSHOT_PATH = require('path').join(__dirname, 'no-snapshot-on-purpose.json');
+
 const realFetch = global.fetch;
 
 const CLUBS = {
@@ -43,7 +49,11 @@ global.fetch = async (url) => {
   if (str.includes('sparql')) {
     const q = decodeURIComponent(str);
     const block = (name) => {
-      const m = q.match(new RegExp(`VALUES \\\\?${name} \\\\{([^}]*)\\\\}`));
+      // Character classes instead of backslash escapes: the escaping was wrong
+      // here once (the regex looked for an optional literal backslash rather
+      // than a "?"), the block never matched, and the mock silently returned
+      // empty squads. Character classes cannot be mis-escaped.
+      const m = q.match(new RegExp('VALUES [?]' + name + ' [{]([^}]*)[}]'));
       return m ? [...m[1].matchAll(/wd:(\S+)/g)].map((x) => x[1]) : [];
     };
 
@@ -76,6 +86,20 @@ global.fetch = async (url) => {
   }
 
   return realFetch(url);
+};
+
+// Port allocation: the runner used to hand down a random port, which collided
+// often enough that a real spec failed as "server did not come up". Instead the
+// runner passes PORT=0, the OS picks a free port, and we report the one we
+// actually got back over IPC. No guessing, no collisions.
+const http = require('http');
+const realListen = http.Server.prototype.listen;
+http.Server.prototype.listen = function patchedListen(...args) {
+  this.once('listening', () => {
+    const address = this.address();
+    if (address && process.send) process.send({ type: 'listening', port: address.port });
+  });
+  return realListen.apply(this, args);
 };
 
 require('../../server/index.js');
