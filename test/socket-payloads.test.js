@@ -13,7 +13,7 @@
  * and the server processed what came before it.
  */
 const assert = require('assert');
-const { startTestServer, connectClient, waitFor } = require('./helpers');
+const { startTestServer, connectClient, waitFor, waitForAll, submit } = require('./helpers');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -143,7 +143,7 @@ module.exports = async function run() {
       x.emit('joinQueue', { name: 'Devam' });
       y.emit('joinQueue', { name: 'Eden' });
       await bothMatched;
-      await waitFor(x, 'openTeamSubmit', 12000);
+      await waitForAll([x, y], 'openTeamSubmit', 12000);
 
       const victim = await connectClient(server.url);
       let victimDropped = false;
@@ -162,8 +162,8 @@ module.exports = async function run() {
       assert.ok(x.connected && y.connected, 'the in-progress match lost a connection');
       const acceptedX = waitFor(x, 'teamAccepted', 8000);
       const acceptedY = waitFor(y, 'teamAccepted', 8000);
-      x.emit('submitTeam', { team: 'Chelsea' });
-      y.emit('submitTeam', { team: 'Liverpool' });
+      submit(x, 'submitTeam', { team: 'Chelsea' });
+      submit(y, 'submitTeam', { team: 'Liverpool' });
       await Promise.all([acceptedX, acceptedY]);
 
       notes.push('100 KB payload: sadece o bağlantı kapandı, devam eden maç etkilenmedi');
@@ -181,13 +181,35 @@ module.exports = async function run() {
       await Promise.all([matchedA, matchedB]);
 
       // Wait for the team phase to actually open.
-      await waitFor(a, 'openTeamSubmit', 10000);
+      await waitForAll([a, b], 'openTeamSubmit', 10000);
 
       // Every rejection is itself proof the payload reached the handler.
+      //
+      // Two sweeps, because there are now two gates. Submissions have to name
+      // the attempt they were typed for, so raw junk is refused by the protocol
+      // before the team logic ever sees it. Sweeping only raw payloads would
+      // quietly stop testing the team logic at all — the rejection count would
+      // still look right.
       const rejections = [];
       a.on('teamRejected', (r) => rejections.push(r && r.reason));
 
+      // Sweep 1: unstamped. Every one must be refused as belonging to no round.
       for (const payload of HOSTILE) a.emit('submitTeam', payload);
+      await sleep(400);
+      assert.strictEqual(rejections.length, HOSTILE.length,
+        `unstamped submitTeam: ${rejections.length} of ${HOSTILE.length} refused`);
+      assert.ok(rejections.every((r) => r === 'stale_round'),
+        `unstamped submissions should all be refused as stale, got ${JSON.stringify([...new Set(rejections)])}`);
+      // Refused submissions must not spend the round's attempt budget.
+      assert.ok(!rejections.includes('too_many_attempts'),
+        'refused protocol-level submissions consumed the attempt budget');
+
+      // Sweep 2: correctly stamped, malformed everywhere else — so the payloads
+      // reach the team logic and it is that which has to survive them.
+      rejections.length = 0;
+      for (const payload of HOSTILE) {
+        submit(a, 'submitTeam', payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {});
+      }
       await sleep(400);
 
       assert.ok(a.connected && b.connected, 'hostile submitTeam closed a player connection');
@@ -201,12 +223,12 @@ module.exports = async function run() {
       // That round is now spent for A, so it times out and replays. The next
       // round must be completely normal.
       await waitFor(a, 'roundVoid', 20000);
-      await waitFor(a, 'openTeamSubmit', 20000);
+      await waitForAll([a, b], 'openTeamSubmit', 20000);
 
       const acceptedA = waitFor(a, 'teamAccepted', 8000);
       const acceptedB = waitFor(b, 'teamAccepted', 8000);
-      a.emit('submitTeam', { team: 'Chelsea' });
-      b.emit('submitTeam', { team: 'Liverpool' });
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
       await Promise.all([acceptedA, acceptedB]);
 
       // Guesses only count once the server opens the guess window.
@@ -214,11 +236,25 @@ module.exports = async function run() {
       await waitFor(a, 'openGuess', 12000);
 
       const guessRejections = [];
+      const guessRefusals = [];
       a.on('guessRejected', (r) => guessRejections.push(r && r.reason));
+      a.on('guessTooLate', (r) => guessRefusals.push(r && r.reason));
+
+      // Unstamped answers are refused as belonging to no round.
       for (const payload of HOSTILE) a.emit('submitGuess', payload);
+      await sleep(400);
+      assert.strictEqual(guessRefusals.length, HOSTILE.length,
+        `unstamped submitGuess: ${guessRefusals.length} of ${HOSTILE.length} refused`);
+      assert.ok(guessRefusals.every((r) => r === 'stale_round'),
+        `unstamped answers should all be refused as stale, got ${JSON.stringify([...new Set(guessRefusals)])}`);
+
+      // Stamped but malformed, so the matcher is what has to survive them.
+      for (const payload of HOSTILE) {
+        submit(a, 'submitGuess', payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {});
+      }
       // A well-formed but wrong guess proves the handler is reachable: the
       // malformed ones are dropped before they reach the matcher.
-      a.emit('submitGuess', { guess: 'Yok Böyle Bir Oyuncu' });
+      submit(a, 'submitGuess', { guess: 'Yok Böyle Bir Oyuncu' });
       await sleep(500);
 
       assert.ok(a.connected, 'hostile submitGuess closed the player connection');
@@ -228,11 +264,12 @@ module.exports = async function run() {
 
       // A real guess still resolves the round.
       const result = waitFor(a, 'roundResult', 15000);
-      a.emit('submitGuess', { guess: 'Mohamed Salah' });
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
       const round = await result;
       assert.ok(round && round.playerName, 'the round should still resolve after hostile guesses');
 
-      notes.push(`oyun içi: ${rejections.length} takım reddi + ${guessRejections.length} tahmin reddi (teslim kanıtı), sonraki tur normal tamamlandı ("${round.playerName}")`);
+      notes.push(`oyun içi: damgasız ${HOSTILE.length} takım + ${HOSTILE.length} cevap "stale_round" ile reddedildi (bütçe harcanmadan); `
+        + `doğru damgalı ${rejections.length} takım reddi + ${guessRejections.length} tahmin reddi, sonraki tur normal tamamlandı ("${round.playerName}")`);
       a.close();
       b.close();
     }
@@ -255,16 +292,16 @@ module.exports = async function run() {
         b.emit('joinQueue', { name: 'Veli' });
         await matched;
 
-        await waitFor(a, 'openTeamSubmit', 12000);
+        await waitForAll([a, b], 'openTeamSubmit', 12000);
         const accepted = Promise.all([waitFor(a, 'teamAccepted', 8000), waitFor(b, 'teamAccepted', 8000)]);
-        a.emit('submitTeam', { team: 'Chelsea' });
-        b.emit('submitTeam', { team: 'Liverpool' });
+        submit(a, 'submitTeam', { team: 'Chelsea' });
+        submit(b, 'submitTeam', { team: 'Liverpool' });
         await accepted;
 
         // Answers are only accepted once the server opens the window, so wait
         // for that rather than firing at the reveal.
         await waitFor(a, 'openGuess', 15000);
-        a.emit('submitGuess', { guess: 'Mohamed Salah' });
+        submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
         await over;
 
         let waitingReplies = 0;

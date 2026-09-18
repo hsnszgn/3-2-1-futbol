@@ -555,12 +555,17 @@ function createRoom(socketA, socketB) {
     round: 0,
     scores: { [socketA.id]: 0, [socketB.id]: 0 },
     state: 'idle',
-    // One id per attempt at a round. A voided round is replayed under the same
-    // round NUMBER, so the number cannot identify an attempt: an answer still
-    // in flight from the abandoned attempt would land on the replay and score
-    // there. Every phase transition and every post-await check is tied to this
-    // id instead.
-    attemptId: null,
+    // One number per attempt at a round, counting up and never reset — not even
+    // by a rematch. A voided round is replayed under the same round NUMBER, so
+    // the round number cannot identify an attempt.
+    //
+    // It is a counter rather than a random id so that it can be COMPARED. The
+    // client needs that: Socket.IO connection state recovery replays the events
+    // a client missed, with their original payloads, so a returning player is
+    // handed the closed attempt's phase and clock. Being able to see that a
+    // replayed event is older than what it already has is what lets the client
+    // ignore it.
+    attempt: 0,
     teamSubs: {},
     teamAttempts: {},
     playerGuessResolved: false,
@@ -568,6 +573,7 @@ function createRoom(socketA, socketB) {
     // it opens and when it closes and renders that; it does not decide either.
     guessOpensAt: 0,
     guessClosesAt: 0,
+    teamClosesAt: 0,
     rematchRequests: new Set(),
     timer: null,
   };
@@ -655,16 +661,73 @@ function startRound(room, { retry = false } = {}) {
 function openTeamSubmission(room) {
   room.state = 'team-submit';
   // A fresh attempt: this is the point where a replayed round becomes a
-  // genuinely new one as far as every in-flight answer is concerned.
-  room.attemptId = randomUUID();
+  // genuinely new one as far as every in-flight submission is concerned.
+  room.attempt += 1;
   room.teamSubs = {};
   room.teamAttempts = {};
   room.guessOpensAt = 0;
   room.guessClosesAt = 0;
-  io.to(room.id).emit('openTeamSubmit', { timeoutMs: TEAM_SUBMIT_MS });
+  room.teamClosesAt = Date.now() + TEAM_SUBMIT_MS;
+  io.to(room.id).emit('openTeamSubmit', phaseTiming(room, {
+    timeoutMs: TEAM_SUBMIT_MS,
+    closesAt: room.teamClosesAt,
+  }));
 
   clearTimer(room);
   room.timer = onThisAttempt(room, () => resolveTeamsPhase(room), TEAM_SUBMIT_MS);
+}
+
+/**
+ * Does this submission name the attempt that is actually open?
+ *
+ * A missing number is treated as stale too. The client is served from the same
+ * origin as the server, so there is no version of it in the wild that does not
+ * send one — and accepting unstamped submissions would leave the whole hole
+ * open for anything that simply omits the field.
+ */
+function isCurrentAttempt(room, attempt) {
+  return Number.isInteger(attempt) && attempt === room.attempt;
+}
+
+/**
+ * Stamps a phase event with its attempt and the server's own clock.
+ *
+ * `serverNow` is what makes the absolute deadlines usable: the client cannot
+ * trust its own clock to agree with ours (a phone can be minutes off), so it
+ * works out the offset from this and measures the deadline against that,
+ * instead of against a raw local Date.now().
+ */
+function phaseTiming(room, extra) {
+  return { attempt: room.attempt, serverNow: Date.now(), ...extra };
+}
+
+/**
+ * Brings a returning player back to the CURRENT state of the room.
+ *
+ * Connection state recovery replays the events this socket missed, with their
+ * original payloads — including the clock of a phase that has since closed. So
+ * a player who dropped mid-round came back to a full-length timer on a round
+ * that was nearly over. The replayed events are ignored by the client because
+ * they carry an older attempt number; this is what tells it the truth instead.
+ */
+function sendPhaseSync(room, socketId) {
+  io.to(socketId).emit('phaseSync', phaseTiming(room, {
+    state: room.state,
+    round: room.round,
+    maxRounds: MAX_ROUNDS,
+    scores: scoresForClient(room),
+    teamClosesAt: room.teamClosesAt || 0,
+    guessOpensAt: room.guessOpensAt || 0,
+    guessClosesAt: room.guessClosesAt || 0,
+    resolved: room.resolvedTeams && room.state === 'player-submit'
+      ? Object.fromEntries(room.players.map((pl) => [
+        pl.socketId,
+        { display: room.resolvedTeams[pl.socketId].display, name: pl.name },
+      ]))
+      : null,
+    mySubmittedTeam: room.teamSubs[socketId] ? room.teamSubs[socketId].display : null,
+    guessResolved: Boolean(room.playerGuessResolved),
+  }));
 }
 
 /**
@@ -675,9 +738,9 @@ function openTeamSubmission(room) {
  * because `room` is the same object and the round number is the same too.
  */
 function onThisAttempt(room, fn, delayMs) {
-  const attempt = room.attemptId;
+  const attempt = room.attempt;
   return setTimeout(() => {
-    if (rooms.get(room.id) !== room || room.attemptId !== attempt) return;
+    if (rooms.get(room.id) !== room || room.attempt !== attempt) return;
     fn();
   }, delayMs);
 }
@@ -694,7 +757,7 @@ function onThisAttempt(room, fn, delayMs) {
 function voidRound(room, reason, next) {
   io.to(room.id).emit('roundVoid', { reason });
   room.state = 'void';
-  room.attemptId = randomUUID();
+  room.attempt += 1;
   room.timer = onThisAttempt(room, next, NEXT_ROUND_DELAY_MS);
 }
 
@@ -721,12 +784,12 @@ function resolveTeamsPhase(room) {
   // reveal animation and the players' typing — by the time anyone submits a
   // guess, this has usually already resolved and matching is instant.
   room.commonPlayersPromise = getCommonPlayers(subA, subB);
-  const lookupAttempt = room.attemptId;
+  const lookupAttempt = room.attempt;
   room.commonPlayersPromise.then((result) => {
     // The lookup outlives the attempt that started it when the round is voided
     // while it is in flight, so its result is only allowed to act on its own
     // attempt.
-    if (rooms.get(room.id) !== room || room.attemptId !== lookupAttempt) return;
+    if (rooms.get(room.id) !== room || room.attempt !== lookupAttempt) return;
     if (room.state !== 'player-submit' || room.playerGuessResolved) return;
 
     if (!result.ok) {
@@ -759,22 +822,26 @@ function resolveTeamsPhase(room) {
   room.guessOpensAt = Date.now() + REVEAL_HOLD_MS;
   room.guessClosesAt = room.guessOpensAt + PLAYER_GUESS_MS;
 
-  io.to(room.id).emit('teamsRevealed', {
+  io.to(room.id).emit('teamsRevealed', phaseTiming(room, {
     teams: {
       [ids[0]]: { display: subA.display, name: room.players.find((p) => p.socketId === ids[0]).name },
       [ids[1]]: { display: subB.display, name: room.players.find((p) => p.socketId === ids[1]).name },
     },
     opensInMs: REVEAL_HOLD_MS,
     timeoutMs: PLAYER_GUESS_MS,
-  });
+    opensAt: room.guessOpensAt,
+    closesAt: room.guessClosesAt,
+  }));
 
   clearTimer(room);
   // An explicit "you may answer now", so neither the client nor a test has to
   // re-derive the opening from the reveal hold.
   room.timer = onThisAttempt(room, () => {
-    io.to(room.id).emit('openGuess', {
+    io.to(room.id).emit('openGuess', phaseTiming(room, {
       timeoutMs: Math.max(0, room.guessClosesAt - Date.now()),
-    });
+      opensAt: room.guessOpensAt,
+      closesAt: room.guessClosesAt,
+    }));
 
     room.timer = onThisAttempt(room, () => {
       if (room.playerGuessResolved) return;
@@ -852,6 +919,16 @@ async function sendStatsUpdate(room) {
 }
 
 io.on('connection', (socket) => {
+  // A clock sample the client can trust.
+  //
+  // Phase events carry absolute deadlines and the server time they were sent
+  // at, but recovery replays them with their ORIGINAL payloads — so their
+  // timestamp is stale, and using it to work out the clock offset reproduces
+  // exactly the error the absolute deadline was meant to remove. This event is
+  // created on this connection, so it is fresh by construction, and it is one
+  // of only two the client will take the offset from (the other is phaseSync).
+  socket.emit('clock', { serverNow: Date.now() });
+
   // A recovered connection (Socket.IO connection state recovery) already has
   // its previous socket.data (roomId, name) restored — don't wipe it.
   if (!socket.recovered) {
@@ -868,6 +945,9 @@ io.on('connection', (socket) => {
       }
       socket.join(room.id);
       socket.to(room.id).emit('opponentReconnected');
+      // The replayed events this socket is about to receive describe the room
+      // as it was when it dropped. Tell it what is true now.
+      sendPhaseSync(room, socket.id);
     } else {
       // Room was already torn down before this socket made it back.
       socket.data.roomId = null;
@@ -998,15 +1078,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  onSocketEvent(socket, 'submitTeam', async ({ team } = {}) => {
+  onSocketEvent(socket, 'submitTeam', async ({ team, attempt } = {}) => {
     const room = rooms.get(socket.data.roomId);
-    if (!room || room.state !== 'team-submit') return;
+    if (!room) return;
+    // Staleness is checked before anything else so the player is actually told.
+    // A submission stranded by a dropped transport usually arrives when the
+    // room has moved to another phase entirely, and a check further down would
+    // drop it silently — leaving the player watching a spinner for a club they
+    // did send.
+    // The attempt the PLAYER typed this for, as stamped by their client.
+    //
+    // Taking the attempt from the room when the message arrives is not enough.
+    // A client that loses its transport queues what it sends and replays it on
+    // reconnect, so a club chosen for a window that has since closed arrived
+    // afterwards and was entered into the next attempt — spending that
+    // attempt's one team choice on something the player never picked for it.
+    if (!isCurrentAttempt(room, attempt)) {
+      socket.emit('teamRejected', { reason: 'stale_round' });
+      return;
+    }
+    if (room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return; // already submitted
-    // Which attempt this club is meant for. Resolving it goes to the network,
-    // and a round can be voided and replayed while that is in flight — without
-    // this, a club typed for the abandoned attempt would be entered into the
-    // replay, for a round the player never chose it for.
-    const attempt = room.attemptId;
 
     const attempts = (room.teamAttempts[socket.id] || 0) + 1;
     room.teamAttempts[socket.id] = attempts;
@@ -1025,7 +1117,7 @@ io.on('connection', (socket) => {
 
     // Resolving may have gone to the network — make sure this is still the same
     // attempt at the same round, and that it is still waiting for this team.
-    if (rooms.get(socket.data.roomId) !== room || room.attemptId !== attempt) return;
+    if (rooms.get(socket.data.roomId) !== room || room.attempt !== attempt) return;
     if (room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return;
 
@@ -1050,17 +1142,22 @@ io.on('connection', (socket) => {
     }
   });
 
-  onSocketEvent(socket, 'submitGuess', async ({ guess } = {}) => {
+  onSocketEvent(socket, 'submitGuess', async ({ guess, attempt } = {}) => {
     // Everything that decides WHEN this answer arrived is read before any
     // await. Reading the clock after the Wikidata lookup made the score depend
     // on how slow Wikidata happened to be: the same answer, typed at the same
     // moment, was worth +3 on a fast day and +1 on a slow one.
     const receivedAt = Date.now();
     const room = rooms.get(socket.data.roomId);
-    if (!room || room.state !== 'player-submit') return;
-    // The attempt this answer belongs to. Captured here so a result arriving
-    // after the round was voided and replayed cannot score on the replay.
-    const attempt = room.attemptId;
+    if (!room) return;
+    // Same protocol rule as submitTeam, and checked first for the same reason:
+    // an answer replayed from a client's offline queue usually lands in a
+    // different phase, and must be refused out loud rather than dropped.
+    if (!isCurrentAttempt(room, attempt)) {
+      socket.emit('guessTooLate', { reason: 'stale_round' });
+      return;
+    }
+    if (room.state !== 'player-submit') return;
     const safeGuess = cleanInput(guess);
     if (!safeGuess) return;
 
@@ -1092,7 +1189,7 @@ io.on('connection', (socket) => {
     // Re-check everything after the await — the round may have ended, the
     // opponent may have already won it, the round may have been voided and
     // replayed, or the room may be gone entirely.
-    if (rooms.get(socket.data.roomId) !== room || room.attemptId !== attempt) return;
+    if (rooms.get(socket.data.roomId) !== room || room.attempt !== attempt) return;
     if (room.state !== 'player-submit') return;
     if (room.playerGuessResolved) {
       socket.emit('guessTooLate', { reason: 'opponent_was_faster' });

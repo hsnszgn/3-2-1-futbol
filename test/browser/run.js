@@ -89,7 +89,12 @@ async function main() {
     let server;
     try {
       if (spec.mod.needsDatabase) await resetDatabase();
-      server = await startTestServer(spec.mod.needsDatabase ? { DATABASE_URL: TEST_DB } : {});
+      // A spec may ask for different server settings — a one-round game, say,
+      // so it can reach the end state without playing five.
+      server = await startTestServer({
+        ...(spec.mod.env || {}),
+        ...(spec.mod.needsDatabase ? { DATABASE_URL: TEST_DB } : {}),
+      });
       const detail = await spec.mod.run({ browser, baseUrl: server.url });
       console.log(`GEÇTİ (${Date.now() - started}ms)`);
       if (detail) console.log(`      ${detail}`);

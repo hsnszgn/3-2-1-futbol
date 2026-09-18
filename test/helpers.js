@@ -125,6 +125,20 @@ function connectClient(url, auth, options = {}) {
       reconnectionDelay: options.reconnectionDelay || 50,
       auth: auth || {},
     });
+    // Submissions must name the attempt they were typed for, exactly as the real
+    // client does, so tests track it the same way: the newest attempt seen on a
+    // phase event. Without this every test would have to plumb the number by
+    // hand, and one that forgot would silently be testing the protocol gate
+    // instead of whatever it meant to test.
+    socket.currentAttempt = -1;
+    for (const event of ['openTeamSubmit', 'teamsRevealed', 'openGuess', 'phaseSync']) {
+      socket.on(event, (payload) => {
+        if (payload && typeof payload.attempt === 'number' && payload.attempt >= socket.currentAttempt) {
+          socket.currentAttempt = payload.attempt;
+        }
+      });
+    }
+
     const timer = setTimeout(() => reject(new Error('socket did not connect')), 8000);
     socket.on('connect', () => {
       clearTimeout(timer);
@@ -152,9 +166,30 @@ function waitFor(socket, event, timeoutMs = 5000) {
   });
 }
 
+/**
+ * Waits for a phase event on EVERY socket, not just one.
+ *
+ * Each socket learns the current attempt from its own copy of the event, and
+ * they do not arrive in lockstep. A test that waits on one player and then
+ * submits for both will have the second submit an attempt it has not been told
+ * about yet — which the server correctly refuses. The real client cannot have
+ * this problem: a player cannot type into a phase their screen has not reached.
+ */
+function waitForAll(sockets, event, timeoutMs = 15000) {
+  return Promise.all(sockets.map((s) => waitFor(s, event, timeoutMs)));
+}
+
+/**
+ * Emits a submission stamped with the attempt this socket is currently on —
+ * what the real client does in `submitTeam` / `submitGuess`.
+ */
+function submit(socket, event, payload = {}) {
+  socket.emit(event, { ...payload, attempt: socket.currentAttempt });
+}
+
 /** Keeps expected server-side error logging out of the test output. */
 function silenceConsole() {
   return () => {};
 }
 
-module.exports = { startTestServer, connectClient, waitFor, waitForHttp, silenceConsole };
+module.exports = { startTestServer, connectClient, waitFor, waitForAll, waitForHttp, submit, silenceConsole };

@@ -211,6 +211,12 @@ socket.on('connect', () => {
 });
 
 socket.on('matched', ({ opponentName, myName: serverName, maxRounds: mr }) => {
+  // A new room counts its attempts from the start, so anything remembered from
+  // the last game is not "newer" — it is from a different room entirely. Left
+  // in place, every event of the second game would look like a replay of the
+  // first and be ignored, and the player would sit on a dead screen.
+  currentAttempt = -1;
+  guessPhaseOpened = false;
   oppName = opponentName;
   maxRounds = mr;
   h2hBanner.classList.add('hidden');
@@ -297,7 +303,52 @@ socket.on('countdown', ({ value }) => {
   if (value === 'GO') Sound.go(); else Sound.tick();
 });
 
-socket.on('openTeamSubmit', ({ timeoutMs }) => {
+// Which attempt at the current round we are showing.
+//
+// Socket.IO connection state recovery replays the events a client missed, with
+// their original payloads. So a player who drops for a few seconds is handed the
+// phase and the clock of an attempt that has already closed. The attempt number
+// counts up, so anything older than what we already have is a replay of the
+// past and is ignored — the server sends a phaseSync with the truth instead.
+let currentAttempt = -1;
+
+// The offset between the server's clock and ours. Deadlines arrive as absolute
+// server timestamps, and a phone's clock can be minutes out, so they are only
+// meaningful measured against the server's own time.
+//
+// Only messages that are fresh by construction may set this: the `clock` event
+// the server sends on every connection, and `phaseSync`. A phase event's own
+// serverNow must never be used — recovery replays those with their original
+// payloads, and treating a stale timestamp as "now" would put the whole error
+// straight back. It stays 0 until a sample arrives, which is the same as
+// assuming the clocks agree.
+let serverClockOffset = 0;
+
+function noteServerTime(serverNow) {
+  if (typeof serverNow === 'number') serverClockOffset = serverNow - Date.now();
+}
+
+socket.on('clock', ({ serverNow }) => noteServerTime(serverNow));
+
+/** How long is really left, by the server's clock. */
+function remainingMs(closesAt, fallbackMs) {
+  if (typeof closesAt !== 'number' || !closesAt) return fallbackMs || 0;
+  return Math.max(0, closesAt - (Date.now() + serverClockOffset));
+}
+
+/**
+ * Accepts a phase event, or rejects it as a replay of a closed attempt.
+ * A newer attempt always wins; the same attempt is allowed through so a
+ * legitimate re-send still works.
+ */
+function acceptPhase(payload) {
+  if (!payload || typeof payload.attempt !== 'number') return false;
+  if (payload.attempt < currentAttempt) return false;
+  currentAttempt = payload.attempt;
+  return true;
+}
+
+function openTeamPhase(timeoutMs) {
   hideAllPhases();
   teamPhase.classList.remove('hidden', 'locked');
   teamInput.disabled = false;
@@ -305,6 +356,12 @@ socket.on('openTeamSubmit', ({ timeoutMs }) => {
   teamInput.value = '';
   teamInput.focus();
   runTimer(timerBarTeam, timeoutMs, (id) => { teamTimerInterval = id; }, () => teamTimerInterval);
+}
+
+socket.on('openTeamSubmit', (payload) => {
+  if (!acceptPhase(payload)) return;
+  guessPhaseOpened = false;
+  openTeamPhase(remainingMs(payload.closesAt, payload.timeoutMs));
 });
 
 // Drains a timer bar and turns it red for the last quarter, so time pressure
@@ -352,7 +409,10 @@ function clearPendingTeam() {
 function submitTeam() {
   const val = teamInput.value.trim();
   if (!val || teamInput.disabled) return;
-  socket.emit('submitTeam', { team: val });
+  // Stamped with the attempt this was typed for. If the connection drops, this
+  // sits in Socket.IO's queue and is delivered on reconnect — by which time the
+  // round may have moved on, and the server will refuse it.
+  socket.emit('submitTeam', { team: val, attempt: currentAttempt });
 
   // An unknown club is looked up live, which takes a moment — say so rather
   // than leaving the button looking dead.
@@ -376,9 +436,11 @@ socket.on('teamAccepted', ({ display }) => {
   teamOppStatus.textContent = 'Rakip bekleniyor...';
 });
 
-socket.on('teamRejected', () => {
+socket.on('teamRejected', (payload) => {
   clearPendingTeam();
-  teamFeedback.textContent = 'Tanınmayan takım adı, tekrar dene.';
+  teamFeedback.textContent = payload && payload.reason === 'stale_round'
+    ? 'O tur kapandı — bu tur için tekrar yaz.'
+    : 'Tanınmayan takım adı, tekrar dene.';
   teamFeedback.className = 'feedback error';
 });
 
@@ -420,9 +482,14 @@ function openGuessPhase(timeoutMs) {
 }
 
 // Authoritative opening. The fallback below only covers a lost event.
-socket.on('openGuess', ({ timeoutMs }) => openGuessPhase(timeoutMs));
+socket.on('openGuess', (payload) => {
+  if (!acceptPhase(payload)) return;
+  openGuessPhase(remainingMs(payload.closesAt, payload.timeoutMs));
+});
 
-socket.on('teamsRevealed', ({ teams, timeoutMs, opensInMs }) => {
+socket.on('teamsRevealed', (payload) => {
+  if (!acceptPhase(payload)) return;
+  const { teams, timeoutMs, opensInMs } = payload;
   hideAllPhases();
   revealPhase.classList.remove('hidden');
   const myTeam = teams[mySocketId];
@@ -444,9 +511,75 @@ socket.on('teamsRevealed', ({ teams, timeoutMs, opensInMs }) => {
   // fallback in case the openGuess event goes missing; it uses the server's
   // own hold, not a number of our own.
   clearTimeout(revealTimer);
-  const hold = typeof opensInMs === 'number' ? opensInMs : 1600;
   const grace = 250;
-  revealTimer = setTimeout(() => openGuessPhase(Math.max(0, timeoutMs - grace)), hold + grace);
+  const hold = payload.opensAt
+    ? remainingMs(payload.opensAt, opensInMs)
+    : (typeof opensInMs === 'number' ? opensInMs : 1600);
+  // The fallback measures the remaining time when it fires, against the
+  // server's deadline — never a fresh full-length window.
+  revealTimer = setTimeout(
+    () => openGuessPhase(remainingMs(payload.closesAt, Math.max(0, timeoutMs - grace))),
+    hold + grace,
+  );
+});
+
+/**
+ * The room as it is right now, sent after a reconnect.
+ *
+ * Without this, a returning player was put back into the phase they left, with
+ * that phase's original clock — a full-length timer on a round that was nearly
+ * over.
+ */
+socket.on('phaseSync', (payload) => {
+  if (!payload || typeof payload.attempt !== 'number') return;
+  currentAttempt = payload.attempt;
+  noteServerTime(payload.serverNow);
+  clearTimeout(revealTimer);
+  clearInterval(teamTimerInterval);
+  clearInterval(guessTimerInterval);
+
+  if (payload.state === 'team-submit') {
+    guessPhaseOpened = false;
+    openTeamPhase(remainingMs(payload.teamClosesAt, 0));
+    if (payload.mySubmittedTeam) {
+      // Already submitted before dropping — don't offer a second go.
+      teamPhase.classList.add('locked');
+      teamInput.disabled = true;
+      btnSubmitTeam.disabled = true;
+      teamInput.value = payload.mySubmittedTeam;
+      teamFeedback.textContent = `${payload.mySubmittedTeam} gönderildi.`;
+      teamFeedback.className = 'feedback';
+    }
+    return;
+  }
+
+  if (payload.state === 'player-submit' && payload.resolved) {
+    const mine = payload.resolved[mySocketId];
+    const oppId = Object.keys(payload.resolved).find((id) => id !== mySocketId);
+    const theirs = payload.resolved[oppId];
+    if (mine && theirs) {
+      opponentTeamCache = theirs;
+      document.getElementById('revealMyTeam').textContent = mine.display;
+      document.getElementById('revealOppTeam').textContent = theirs.display;
+      document.getElementById('revealOppLabel').textContent = theirs.name.toUpperCase();
+    }
+    guessPhaseOpened = false;
+    const opensIn = remainingMs(payload.guessOpensAt, 0);
+    if (opensIn > 0) {
+      hideAllPhases();
+      revealPhase.classList.remove('hidden');
+      revealTimer = setTimeout(
+        () => openGuessPhase(remainingMs(payload.guessClosesAt, 0)),
+        opensIn,
+      );
+    } else if (!payload.guessResolved) {
+      openGuessPhase(remainingMs(payload.guessClosesAt, 0));
+    }
+    return;
+  }
+
+  // Countdown, void and the gap between rounds all resolve themselves within
+  // seconds from the events that follow, so there is nothing to restore.
 });
 
 // The reveal is still running, so this answer is not accepted yet. In the real
@@ -478,7 +611,7 @@ function submitGuess() {
   if (!val || guessInput.disabled) return;
   guessFeedback.textContent = 'Kontrol ediliyor...';
   guessFeedback.className = 'feedback';
-  socket.emit('submitGuess', { guess: val });
+  socket.emit('submitGuess', { guess: val, attempt: currentAttempt });
 
   // Never let a slow answer look like a dead button.
   clearPendingGuess();
@@ -513,8 +646,8 @@ socket.on('lookupIssue', ({ reason }) => {
 // mean the answer was not wrong, so say which it was.
 socket.on('guessTooLate', (payload) => {
   clearPendingGuess();
-  guessFeedback.textContent = payload && payload.reason === 'window_closed'
-    ? 'Süre doldu.'
+  guessFeedback.textContent = payload && payload.reason === 'window_closed' ? 'Süre doldu.'
+    : payload && payload.reason === 'stale_round' ? 'O tur kapandı.'
     : 'Rakip senden hızlı davrandı!';
   guessFeedback.className = 'feedback error';
   guessInput.disabled = true;

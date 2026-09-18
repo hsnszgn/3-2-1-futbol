@@ -26,7 +26,7 @@
  * is read before any await.
  */
 const assert = require('assert');
-const { startTestServer, connectClient, waitFor } = require('./helpers');
+const { startTestServer, connectClient, waitFor, waitForAll, submit } = require('./helpers');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,14 +42,17 @@ async function pair(server) {
 
 /** Submits the two clubs and returns the reveal payload plus the open payload. */
 async function reachGuessPhase(a, b, teams = ['Chelsea', 'Liverpool']) {
-  await waitFor(a, 'openTeamSubmit', 15000);
+  await waitForAll([a, b], 'openTeamSubmit', 15000);
   const revealed = waitFor(a, 'teamsRevealed', 15000);
   const opened = waitFor(a, 'openGuess', 15000);
   const accepted = Promise.all([waitFor(a, 'teamAccepted', 8000), waitFor(b, 'teamAccepted', 8000)]);
-  a.emit('submitTeam', { team: teams[0] });
-  b.emit('submitTeam', { team: teams[1] });
+  submit(a, 'submitTeam', { team: teams[0] });
+  submit(b, 'submitTeam', { team: teams[1] });
   await accepted;
-  return { reveal: await revealed, open: await opened };
+  const reveal = await revealed;
+  const revealedAt = Date.now();
+  const open = await opened;
+  return { reveal, open, revealedAt, openedAt: Date.now() };
 }
 
 module.exports = async function run() {
@@ -60,9 +63,11 @@ module.exports = async function run() {
     const server = await startTestServer();
     try {
       const [a, b] = await pair(server);
-      const revealedAt = Date.now();
-      const { reveal, open } = await reachGuessPhase(a, b);
-      const openedAt = Date.now();
+      // Timed from the reveal ITSELF. An earlier version started the clock
+      // before reachGuessPhase, which also contains the round countdown and the
+      // team window — so it was measuring far more than the reveal hold and
+      // would have passed no matter what the hold was.
+      const { reveal, open, revealedAt, openedAt } = await reachGuessPhase(a, b);
 
       assert.strictEqual(typeof reveal.opensInMs, 'number',
         'the reveal must say when the guess window opens');
@@ -92,15 +97,15 @@ module.exports = async function run() {
     const server = await startTestServer();
     try {
       const [a, b] = await pair(server);
-      await waitFor(a, 'openTeamSubmit', 15000);
+      await waitForAll([a, b], 'openTeamSubmit', 15000);
       const revealed = waitFor(a, 'teamsRevealed', 15000);
-      a.emit('submitTeam', { team: 'Chelsea' });
-      b.emit('submitTeam', { team: 'Liverpool' });
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
       await revealed;
 
       // Straight in, during the reveal. The right answer, too early.
       const early = waitFor(a, 'guessTooEarly', 8000);
-      a.emit('submitGuess', { guess: 'Mohamed Salah' });
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
       const payload = await early;
       assert.ok(payload.opensInMs > 0,
         'a too-early answer should say how long is left before the window opens');
@@ -108,7 +113,7 @@ module.exports = async function run() {
       // It must not have scored, and the round must still be winnable.
       await waitFor(a, 'openGuess', 15000);
       const result = waitFor(a, 'roundResult', 15000);
-      a.emit('submitGuess', { guess: 'Mohamed Salah' });
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
       const round = await result;
       assert.strictEqual(round.winnerSocketId, a.id, 'the round should be won normally afterwards');
 
@@ -133,7 +138,7 @@ module.exports = async function run() {
         await reachGuessPhase(a, b);
 
         const result = waitFor(a, 'roundResult', 25000);
-        a.emit('submitGuess', { guess: 'Mohamed Salah' });
+        submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
         const round = await result;
         measured.push({ delay, points: round.points, elapsedMs: round.elapsedMs });
         a.close();
@@ -160,26 +165,38 @@ module.exports = async function run() {
   // +3 within 5s, +2 within 12s, +1 after. Only the +3 tier was ever verified
   // before; these two wait out the clock.
   {
+    const tierNotes = [];
     const server = await startTestServer();
     try {
-      for (const { waitMs, expected } of [{ waitMs: 7000, expected: 2 }, { waitMs: 14000, expected: 1 }]) {
+      // Either side of each threshold, not a comfortable sample in the middle
+      // of each band: 5s and 12s are the boundaries, so those are what matter.
+      const CASES = [
+        { waitMs: 4300, expected: 3 },   // just inside +3
+        { waitMs: 5700, expected: 2 },   // just past it
+        { waitMs: 11300, expected: 2 },  // just inside +2
+        { waitMs: 12700, expected: 1 },  // just past it
+      ];
+      for (const { waitMs, expected } of CASES) {
         const [a, b] = await pair(server);
         await reachGuessPhase(a, b);
 
         await sleep(waitMs);
         const result = waitFor(a, 'roundResult', 25000);
-        a.emit('submitGuess', { guess: 'Mohamed Salah' });
+        submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
         const round = await result;
 
         assert.strictEqual(round.points, expected,
           `an answer after ${waitMs}ms should score +${expected}, got +${round.points} (elapsed ${round.elapsedMs}ms)`);
-        assert.ok(Math.abs(round.elapsedMs - waitMs) < 1500,
+        // The measured elapsed time has to stay on the intended side of the
+        // boundary, or the test is not testing the boundary at all.
+        assert.ok(Math.abs(round.elapsedMs - waitMs) < 500,
           `elapsed ${round.elapsedMs}ms does not match the ${waitMs}ms wait`);
 
-        notes.push(`${waitMs}ms -> +${round.points} (ölçülen ${round.elapsedMs}ms)`);
+        tierNotes.push(`${waitMs}ms -> +${round.points} (${round.elapsedMs}ms)`);
         a.close();
         b.close();
       }
+      notes.push(`kademe sınırları (5s/12s iki yanı): ${tierNotes.join(', ')}`);
     } finally {
       await server.stop();
     }
@@ -205,17 +222,17 @@ module.exports = async function run() {
     });
     try {
       const [a, b] = await pair(server);
-      await waitFor(a, 'openTeamSubmit', 15000);
+      await waitForAll([a, b], 'openTeamSubmit', 15000);
 
       const voided = waitFor(a, 'roundVoid', 20000);
-      a.emit('submitTeam', { team: 'Chelsea' });
-      b.emit('submitTeam', { team: 'Liverpool' });
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
       await waitFor(a, 'teamsRevealed', 15000);
       await waitFor(a, 'openGuess', 15000);
 
       // A correct answer, inside the window — but the lookup will not come back
       // before the window closes.
-      a.emit('submitGuess', { guess: 'Mohamed Salah' });
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
 
       const reason = (await voided).reason;
       assert.strictEqual(reason, 'timeout_guess',
@@ -227,10 +244,10 @@ module.exports = async function run() {
       // The next round: new attempt, new lookup, and the stale answer's lookup
       // resolves right about here.
       const next = await waitFor(a, 'roundStart', 20000);
-      await waitFor(a, 'openTeamSubmit', 15000);
+      await waitForAll([a, b], 'openTeamSubmit', 15000);
       const accepted = Promise.all([waitFor(a, 'teamAccepted', 8000), waitFor(b, 'teamAccepted', 8000)]);
-      a.emit('submitTeam', { team: 'Chelsea' });
-      b.emit('submitTeam', { team: 'Liverpool' });
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
       await accepted;
       await waitFor(a, 'teamsRevealed', 15000);
 
@@ -264,7 +281,7 @@ module.exports = async function run() {
     });
     try {
       const [a, b] = await pair(server);
-      await waitFor(a, 'openTeamSubmit', 15000);
+      await waitForAll([a, b], 'openTeamSubmit', 15000);
 
       const accepted = [];
       a.on('teamAccepted', (t) => accepted.push(t.display));
@@ -274,7 +291,7 @@ module.exports = async function run() {
       // built-in team list, so resolving it goes to the network and takes
       // longer than the window — the built-in clubs resolve locally in under a
       // millisecond and cannot reach this path at all.
-      a.emit('submitTeam', { team: 'Deneme Kulubu' });
+      submit(a, 'submitTeam', { team: 'Deneme Kulubu' });
       const reason = (await voided).reason;
       assert.strictEqual(reason, 'timeout_team',
         `the team window should have timed out, got "${reason}"`);
@@ -295,9 +312,9 @@ module.exports = async function run() {
       // accepted there normally — retiring the old attempt must not break the
       // new one. Chelsea is in the built-in list, so it resolves instantly and
       // comfortably inside the shortened window.
-      await waitFor(a, 'openTeamSubmit', 20000);
+      await waitForAll([a, b], 'openTeamSubmit', 20000);
       const ok = waitFor(a, 'teamAccepted', 10000);
-      a.emit('submitTeam', { team: 'Chelsea' });
+      submit(a, 'submitTeam', { team: 'Chelsea' });
       assert.strictEqual((await ok).display, 'Chelsea', 'the replay should accept a new club');
 
       notes.push('süresi geçen turun takımı tekrara girmiyor, tekrar normal takım kabul ediyor');
