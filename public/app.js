@@ -393,7 +393,36 @@ socket.on('opponentTeamStatus', ({ submittedBy }) => {
   }
 });
 
-socket.on('teamsRevealed', ({ teams, timeoutMs }) => {
+// The server decides when answers are accepted and how long the window is, and
+// sends both. This used to be a hardcoded 1600ms here plus a full-length timer
+// started after the reveal — while the server's clock had been running through
+// the reveal all along, so the bar still showed time left after the round had
+// already closed.
+let guessPhaseOpened = false;
+
+function openGuessPhase(timeoutMs) {
+  if (guessPhaseOpened) return;
+  guessPhaseOpened = true;
+  clearTimeout(revealTimer);
+  hideAllPhases();
+  guessPhase.classList.remove('hidden');
+  guessInput.disabled = false;
+  btnSubmitGuess.disabled = false;
+  guessInput.value = '';
+  guessInput.focus();
+  runTimer(
+    timerBar,
+    timeoutMs,
+    (id) => { guessTimerInterval = id; },
+    () => guessTimerInterval,
+    () => vignette.classList.add('active'),
+  );
+}
+
+// Authoritative opening. The fallback below only covers a lost event.
+socket.on('openGuess', ({ timeoutMs }) => openGuessPhase(timeoutMs));
+
+socket.on('teamsRevealed', ({ teams, timeoutMs, opensInMs }) => {
   hideAllPhases();
   revealPhase.classList.remove('hidden');
   const myTeam = teams[mySocketId];
@@ -407,23 +436,26 @@ socket.on('teamsRevealed', ({ teams, timeoutMs }) => {
   clearInterval(teamTimerInterval);
   buzz(20);
 
-  // The pause on the reveal is the drama — don't rush past it.
+  // A new attempt at the round: the guess phase has not opened yet, and the
+  // server will say when it does.
+  guessPhaseOpened = false;
+
+  // The pause on the reveal is the drama — don't rush past it. This is only a
+  // fallback in case the openGuess event goes missing; it uses the server's
+  // own hold, not a number of our own.
   clearTimeout(revealTimer);
-  revealTimer = setTimeout(() => {
-    hideAllPhases();
-    guessPhase.classList.remove('hidden');
-    guessInput.disabled = false;
-    btnSubmitGuess.disabled = false;
-    guessInput.value = '';
-    guessInput.focus();
-    runTimer(
-      timerBar,
-      timeoutMs,
-      (id) => { guessTimerInterval = id; },
-      () => guessTimerInterval,
-      () => vignette.classList.add('active'),
-    );
-  }, 1600);
+  const hold = typeof opensInMs === 'number' ? opensInMs : 1600;
+  const grace = 250;
+  revealTimer = setTimeout(() => openGuessPhase(Math.max(0, timeoutMs - grace)), hold + grace);
+});
+
+// The reveal is still running, so this answer is not accepted yet. In the real
+// UI the input is not even visible before then; this covers a client that got
+// ahead of the server.
+socket.on('guessTooEarly', () => {
+  clearPendingGuess();
+  guessFeedback.textContent = 'Henüz cevap zamanı değil, takımlar açıklanıyor.';
+  guessFeedback.className = 'feedback';
 });
 
 document.getElementById('guessInput').addEventListener('keydown', (e) => {
@@ -477,11 +509,13 @@ socket.on('lookupIssue', ({ reason }) => {
   guessFeedback.className = 'feedback error';
 });
 
-// The round was already won while this guess was on its way — the answer
-// wasn't wrong, the opponent was simply faster.
-socket.on('guessTooLate', () => {
+// Either the opponent got there first, or the window had already closed. Both
+// mean the answer was not wrong, so say which it was.
+socket.on('guessTooLate', (payload) => {
   clearPendingGuess();
-  guessFeedback.textContent = 'Rakip senden hızlı davrandı!';
+  guessFeedback.textContent = payload && payload.reason === 'window_closed'
+    ? 'Süre doldu.'
+    : 'Rakip senden hızlı davrandı!';
   guessFeedback.className = 'feedback error';
   guessInput.disabled = true;
   btnSubmitGuess.disabled = true;

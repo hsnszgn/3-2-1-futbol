@@ -209,9 +209,9 @@ module.exports = async function run() {
       b.emit('submitTeam', { team: 'Liverpool' });
       await Promise.all([acceptedA, acceptedB]);
 
-      // Guesses only count once the teams have been revealed.
+      // Guesses only count once the server opens the guess window.
       await waitFor(a, 'teamsRevealed', 12000);
-      await sleep(2000);
+      await waitFor(a, 'openGuess', 12000);
 
       const guessRejections = [];
       a.on('guessRejected', (r) => guessRejections.push(r && r.reason));
@@ -261,7 +261,9 @@ module.exports = async function run() {
         b.emit('submitTeam', { team: 'Liverpool' });
         await accepted;
 
-        await waitFor(a, 'teamsRevealed', 15000);
+        // Answers are only accepted once the server opens the window, so wait
+        // for that rather than firing at the reveal.
+        await waitFor(a, 'openGuess', 15000);
         a.emit('submitGuess', { guess: 'Mohamed Salah' });
         await over;
 

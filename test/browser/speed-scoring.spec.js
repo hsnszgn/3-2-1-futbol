@@ -34,11 +34,12 @@ module.exports.run = async ({ browser, baseUrl }) => {
     assert.strictEqual(score, '3', `winner's score should be 3, got ${score}`);
 
     assert.deepStrictEqual(errors, [], `client errors: ${errors.join(' | ')}`);
-    // Only the fastest tier is exercised here. The +2/+1 tiers and the claim
-    // that scoring is independent of Wikidata latency are NOT verified by this
-    // spec — they need controlled clock/deadline tests, which do not exist yet.
-    return `yalnızca en hızlı kademe doğrulandı: ${points}`
-      + ` (+2/+1 kademeleri ve gecikmeden bağımsızlık bu testte doğrulanmıyor);`
+    // Only the fastest tier is exercised through the UI. The +2/+1 boundaries
+    // and latency-independence need a controlled clock, so they live in
+    // test/round-timing.test.js at the socket level instead of being waited out
+    // in a browser.
+    return `tarayıcıda en hızlı kademe: ${points}`
+      + ` (+2/+1 ve gecikmeden bağımsızlık round-timing testinde);`
       + ` kaybeden mesajı: "${loserText.replace(/\n/g, ' / ')}"`;
   } finally {
     await close();

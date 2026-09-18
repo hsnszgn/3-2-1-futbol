@@ -35,6 +35,13 @@ testler ATLANIR ve atlandıkları açıkça yazılır — geçmiş sayılmazlar.
 TEST_DATABASE_URL=postgres://... npm run test:browser
 ```
 
+**Test amaçlı zamanlama değişkenleri.** `MAX_ROUNDS`, `TEAM_SUBMIT_MS`,
+`PLAYER_GUESS_MS`, `NEXT_ROUND_DELAY_MS` ve fixture'ın
+`TEST_LOOKUP_DELAY_MS` değişkeni **yalnızca testler için** vardır: bir cevap
+uçuştayken pencerenin kapanması gerçek bir yarış ve üretim saatini bekleyerek
+test etmek mümkün değil. Üretimde hiçbirini tanımlamayın — varsayılanlar oyunun
+kendisidir (5 tur, 12s takım, 25s cevap, 3.5s ara).
+
 **Tarayıcı testlerinin kurulumu.** `playwright` bilerek `package.json`'a
 eklenmedi: üretim imajının test tarayıcısı indirmesine gerek yok. Kurulum ve
 doğrulanmış sürümler:
@@ -53,11 +60,12 @@ koşusu olarak ayrı raporlar.
 | Test | Ne kanıtlıyor | DB |
 |---|---|---|
 | `socket-payloads` | 26 bozuk payload × 7 olay, payload'lar **hiç değiştirilmeden** gönderiliyor. Teslim ölçümü yanıt veren olaylarda sunucu yanıtları sayılarak yapılıyor: `joinQueue`, `createPrivateRoom`, `joinPrivateRoom` (26'sı da ayrı yanıt) ve oyun sonu `requestRematch` (26 yanıt) + oyun içi `submitTeam` (26 ayrı reddetme). Kalan olaylarda kanıt daha zayıf: `submitGuess` için yalnızca **bir** normal yanlış tahmin reddi var, `leaveRoom` için oyun içi reddetme ölçümü **yok** — bu ikisinde bozuk payload'lar için iddia "bağlantı ayakta kaldı ve sonrasında çalıştı" ile sınırlı. 16 KB üstü payload **sadece** o bağlantıyı kapatıyor — kapanmazsa test başarısız olur — ve o sırada oynanan maç etkilenmiyor | — |
+| `round-timing` | Tur/süre modeli: cevap penceresini sunucu belirleyip yayınlıyor (`teamsRevealed.opensInMs` + `openGuess.timeoutMs`); açılıştan önce gelen cevap `guessTooEarly` ile reddediliyor (eskiden bedava +3 alıyordu); puan **arama gecikmesinden bağımsız** (20ms ve 4000ms/istek aramada aynı puan); **+3/+2/+1 kademelerinin üçü de** gerçek sınırlarında ölçülüyor; süresi geçmiş turun uçuştaki cevabı sonraki tura yazılmıyor; geç çözülen takım adı iptal olmuş denemeden tekrara taşınmıyor | — |
 | `pending-join` | Host'u beklerken: yinelenen davet hata yaymıyor, `leaveRoom` iptal ediyor, kuyruğa geçiş / **kendi davetini oluşturma** / **zaten kuyruktayken kuyruğu yeniden seçme** eski daveti geçersizleştiriyor. Host'un gerçekten recovery yaptığı (aynı socket id + `recovered`) testte doğrulanıyor | — |
 | `room-integrity` | Tekrarlı `joinQueue` tek maç; kendi davetine katılma reddi; tekrar davet aynı kodu döner | — |
 | `double-match` | Davet kabulü kuyruğu temizler; oyundaki oyuncu tekrar eşleşmez; başarılı katılım hata yaymaz; geçersiz kod sırayı düşürmez | — |
 | `browser/full-match` | 5 tur + tur sayacı sınırı + rövanş | — |
-| `browser/speed-scoring` | **Yalnızca** en hızlı kademe (+3) ve kaybedene gösterilen mesaj. +2/+1 kademeleri ile puanın Wikidata gecikmesinden bağımsızlığı doğrulanmadı | — |
+| `browser/speed-scoring` | Tarayıcıda en hızlı kademe (+3) ve kaybedene gösterilen mesaj. +2/+1 kademeleri ve gecikmeden bağımsızlık **tarayıcıda değil**, `round-timing` içinde socket seviyesinde doğrulanıyor | — |
 | `browser/invite` | Davet linkiyle katılma akışı | — |
 | `browser/void-round` | Ortak oyuncu yoksa tur geçersiz ve tekrarlanır | — |
 | `browser/account-rights` | Hesap silme/dışa aktarma; silme rakibin geçmişini bozmaz | ✓ |

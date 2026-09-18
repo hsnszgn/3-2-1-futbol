@@ -29,9 +29,13 @@ const PORT = process.env.PORT || 3000;
 // Five rounds is the game. It is configurable only so tests can reach the
 // end-game state (rematch, final score) without playing five full rounds.
 const MAX_ROUNDS = Number(process.env.MAX_ROUNDS) || 5;
-const TEAM_SUBMIT_MS = 12000;
-const PLAYER_GUESS_MS = 25000;
-const NEXT_ROUND_DELAY_MS = 3500;
+// The phase lengths. Configurable only so tests can drive the timing paths —
+// a window closing while an answer is still in flight is a real race, and
+// waiting out the production clock to reach it would make the test unusable.
+// The defaults are the game.
+const TEAM_SUBMIT_MS = Number(process.env.TEAM_SUBMIT_MS) || 12000;
+const PLAYER_GUESS_MS = Number(process.env.PLAYER_GUESS_MS) || 25000;
+const NEXT_ROUND_DELAY_MS = Number(process.env.NEXT_ROUND_DELAY_MS) || 3500;
 const RECONNECT_GRACE_MS = 12000;
 
 // Everyone scoring a flat point wasted the tension of a speed game: knowing
@@ -42,8 +46,9 @@ const SPEED_TIERS = [
   { withinMs: 12000, points: 2 },
 ];
 const BASE_POINTS = 1;
-// Must match the reveal hold in public/app.js, so the speed clock starts when
-// the player can actually type.
+// The reveal animation runs before anyone can type, so the speed clock starts
+// after it. The server owns this number and tells the client when the guess
+// window opens; the client no longer keeps its own copy to drift out of sync.
 const REVEAL_HOLD_MS = 1600;
 
 function pointsForSpeed(elapsedMs) {
@@ -550,9 +555,19 @@ function createRoom(socketA, socketB) {
     round: 0,
     scores: { [socketA.id]: 0, [socketB.id]: 0 },
     state: 'idle',
+    // One id per attempt at a round. A voided round is replayed under the same
+    // round NUMBER, so the number cannot identify an attempt: an answer still
+    // in flight from the abandoned attempt would land on the replay and score
+    // there. Every phase transition and every post-await check is tied to this
+    // id instead.
+    attemptId: null,
     teamSubs: {},
     teamAttempts: {},
     playerGuessResolved: false,
+    // Server-authoritative window for the guess phase. The client is told when
+    // it opens and when it closes and renders that; it does not decide either.
+    guessOpensAt: 0,
+    guessClosesAt: 0,
     rematchRequests: new Set(),
     timer: null,
   };
@@ -624,6 +639,8 @@ function startRound(room, { retry = false } = {}) {
 
   let count = 3;
   const tick = () => {
+    // The room can be torn down mid-countdown when a player leaves.
+    if (rooms.get(room.id) !== room) return;
     io.to(room.id).emit('countdown', { value: count > 0 ? count : 'GO' });
     if (count === 0) {
       openTeamSubmission(room);
@@ -637,12 +654,48 @@ function startRound(room, { retry = false } = {}) {
 
 function openTeamSubmission(room) {
   room.state = 'team-submit';
+  // A fresh attempt: this is the point where a replayed round becomes a
+  // genuinely new one as far as every in-flight answer is concerned.
+  room.attemptId = randomUUID();
   room.teamSubs = {};
   room.teamAttempts = {};
+  room.guessOpensAt = 0;
+  room.guessClosesAt = 0;
   io.to(room.id).emit('openTeamSubmit', { timeoutMs: TEAM_SUBMIT_MS });
 
   clearTimer(room);
-  room.timer = setTimeout(() => resolveTeamsPhase(room), TEAM_SUBMIT_MS);
+  room.timer = onThisAttempt(room, () => resolveTeamsPhase(room), TEAM_SUBMIT_MS);
+}
+
+/**
+ * setTimeout for a room, bound to the attempt that scheduled it.
+ *
+ * Timers used to fire against whatever state the room happened to be in. A
+ * timer from an abandoned attempt could void or end the round that replaced it,
+ * because `room` is the same object and the round number is the same too.
+ */
+function onThisAttempt(room, fn, delayMs) {
+  const attempt = room.attemptId;
+  return setTimeout(() => {
+    if (rooms.get(room.id) !== room || room.attemptId !== attempt) return;
+    fn();
+  }, delayMs);
+}
+
+/**
+ * Ends the current attempt and schedules what comes next.
+ *
+ * Announcing the void is not enough on its own. The attempt used to stay
+ * "current" until the replay opened its own team window seconds later, and the
+ * phase state stayed on team-submit — so a club name still resolving over the
+ * network was accepted INTO the dead attempt, and then carried into the replay.
+ * The attempt is retired here, the moment it is announced.
+ */
+function voidRound(room, reason, next) {
+  io.to(room.id).emit('roundVoid', { reason });
+  room.state = 'void';
+  room.attemptId = randomUUID();
+  room.timer = onThisAttempt(room, next, NEXT_ROUND_DELAY_MS);
 }
 
 function resolveTeamsPhase(room) {
@@ -652,14 +705,12 @@ function resolveTeamsPhase(room) {
   const subB = room.teamSubs[ids[1]];
 
   if (!subA || !subB) {
-    io.to(room.id).emit('roundVoid', { reason: 'timeout_team' });
-    room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
+    voidRound(room, 'timeout_team', () => startRound(room, { retry: true }));
     return;
   }
 
   if (sameTeam(subA, subB)) {
-    io.to(room.id).emit('roundVoid', { reason: 'same_team' });
-    room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
+    voidRound(room, 'same_team', () => startRound(room, { retry: true }));
     return;
   }
 
@@ -670,8 +721,13 @@ function resolveTeamsPhase(room) {
   // reveal animation and the players' typing — by the time anyone submits a
   // guess, this has usually already resolved and matching is instant.
   room.commonPlayersPromise = getCommonPlayers(subA, subB);
+  const lookupAttempt = room.attemptId;
   room.commonPlayersPromise.then((result) => {
-    if (rooms.get(room.id) !== room || room.state !== 'player-submit' || room.playerGuessResolved) return;
+    // The lookup outlives the attempt that started it when the round is voided
+    // while it is in flight, so its result is only allowed to act on its own
+    // attempt.
+    if (rooms.get(room.id) !== room || room.attemptId !== lookupAttempt) return;
+    if (room.state !== 'player-submit' || room.playerGuessResolved) return;
 
     if (!result.ok) {
       io.to(room.id).emit('lookupIssue', { reason: result.reason });
@@ -688,36 +744,45 @@ function resolveTeamsPhase(room) {
       // Let the reveal finish first — otherwise the players never see which
       // two clubs came up, and the round just blinks past them.
       const afterReveal = Math.max(0, (room.guessOpensAt || 0) - Date.now());
-      room.timer = setTimeout(() => {
-        io.to(room.id).emit('roundVoid', { reason: 'no_common_players' });
-        room.timer = setTimeout(() => startRound(room, { retry: true }), NEXT_ROUND_DELAY_MS);
+      room.timer = onThisAttempt(room, () => {
+        voidRound(room, 'no_common_players', () => startRound(room, { retry: true }));
       }, afterReveal);
     }
   });
+
+  // The window is decided here, once, by the server: answers are accepted from
+  // guessOpensAt (after the reveal, when a player can actually type) until
+  // guessClosesAt. Both are sent to the client so it renders the same clock
+  // rather than running its own — the old client started a full-length timer
+  // AFTER the reveal while the server's had already been running through it,
+  // so the round closed a reveal early on every single round.
+  room.guessOpensAt = Date.now() + REVEAL_HOLD_MS;
+  room.guessClosesAt = room.guessOpensAt + PLAYER_GUESS_MS;
 
   io.to(room.id).emit('teamsRevealed', {
     teams: {
       [ids[0]]: { display: subA.display, name: room.players.find((p) => p.socketId === ids[0]).name },
       [ids[1]]: { display: subB.display, name: room.players.find((p) => p.socketId === ids[1]).name },
     },
+    opensInMs: REVEAL_HOLD_MS,
     timeoutMs: PLAYER_GUESS_MS,
   });
 
-  // The clock for speed scoring starts when the guess window opens on the
-  // client, which is after the reveal animation — not now.
-  room.guessOpensAt = Date.now() + REVEAL_HOLD_MS;
-
   clearTimer(room);
-  room.timer = setTimeout(() => {
-    if (!room.playerGuessResolved) {
-      io.to(room.id).emit('roundVoid', { reason: 'timeout_guess' });
-      if (room.round >= MAX_ROUNDS) {
-        room.timer = setTimeout(() => endGame(room), NEXT_ROUND_DELAY_MS);
-      } else {
-        room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
-      }
-    }
-  }, PLAYER_GUESS_MS);
+  // An explicit "you may answer now", so neither the client nor a test has to
+  // re-derive the opening from the reveal hold.
+  room.timer = onThisAttempt(room, () => {
+    io.to(room.id).emit('openGuess', {
+      timeoutMs: Math.max(0, room.guessClosesAt - Date.now()),
+    });
+
+    room.timer = onThisAttempt(room, () => {
+      if (room.playerGuessResolved) return;
+      voidRound(room, 'timeout_guess', room.round >= MAX_ROUNDS
+        ? () => endGame(room)
+        : () => startRound(room));
+    }, Math.max(0, room.guessClosesAt - Date.now()));
+  }, REVEAL_HOLD_MS);
 }
 
 function scoresForClient(room) {
@@ -937,6 +1002,11 @@ io.on('connection', (socket) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return; // already submitted
+    // Which attempt this club is meant for. Resolving it goes to the network,
+    // and a round can be voided and replayed while that is in flight — without
+    // this, a club typed for the abandoned attempt would be entered into the
+    // replay, for a round the player never chose it for.
+    const attempt = room.attemptId;
 
     const attempts = (room.teamAttempts[socket.id] || 0) + 1;
     room.teamAttempts[socket.id] = attempts;
@@ -953,9 +1023,10 @@ io.on('connection', (socket) => {
 
     const resolved = await resolveTeamInput(name);
 
-    // Resolving may have gone to the network — make sure the round is still
-    // waiting for this team before acting on the answer.
-    if (rooms.get(socket.data.roomId) !== room || room.state !== 'team-submit') return;
+    // Resolving may have gone to the network — make sure this is still the same
+    // attempt at the same round, and that it is still waiting for this team.
+    if (rooms.get(socket.data.roomId) !== room || room.attemptId !== attempt) return;
+    if (room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return;
 
     if (!resolved) {
@@ -980,14 +1051,38 @@ io.on('connection', (socket) => {
   });
 
   onSocketEvent(socket, 'submitGuess', async ({ guess } = {}) => {
+    // Everything that decides WHEN this answer arrived is read before any
+    // await. Reading the clock after the Wikidata lookup made the score depend
+    // on how slow Wikidata happened to be: the same answer, typed at the same
+    // moment, was worth +3 on a fast day and +1 on a slow one.
+    const receivedAt = Date.now();
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'player-submit') return;
+    // The attempt this answer belongs to. Captured here so a result arriving
+    // after the round was voided and replayed cannot score on the replay.
+    const attempt = room.attemptId;
     const safeGuess = cleanInput(guess);
     if (!safeGuess) return;
+
+    // Answers are only accepted inside the window the server published. The
+    // reveal is still running before guessOpensAt, so an answer sent then came
+    // from a client that skipped the reveal — and it used to be scored as
+    // elapsed 0, i.e. a guaranteed top-tier +3 for answering before the
+    // question was officially open.
+    if (receivedAt < room.guessOpensAt) {
+      socket.emit('guessTooEarly', {
+        opensInMs: Math.max(0, room.guessOpensAt - receivedAt),
+      });
+      return;
+    }
+    if (room.guessClosesAt && receivedAt > room.guessClosesAt) {
+      socket.emit('guessTooLate', { reason: 'window_closed' });
+      return;
+    }
     // A correct answer the opponent beat you to isn't a wrong answer — say so,
     // otherwise a perfectly good guess looks like it was silently rejected.
     if (room.playerGuessResolved) {
-      socket.emit('guessTooLate');
+      socket.emit('guessTooLate', { reason: 'opponent_was_faster' });
       return;
     }
     if (!room.commonPlayersPromise) return;
@@ -995,10 +1090,12 @@ io.on('connection', (socket) => {
     const lookup = await room.commonPlayersPromise;
 
     // Re-check everything after the await — the round may have ended, the
-    // opponent may have already won it, or the room may be gone entirely.
-    if (rooms.get(socket.data.roomId) !== room || room.state !== 'player-submit') return;
+    // opponent may have already won it, the round may have been voided and
+    // replayed, or the room may be gone entirely.
+    if (rooms.get(socket.data.roomId) !== room || room.attemptId !== attempt) return;
+    if (room.state !== 'player-submit') return;
     if (room.playerGuessResolved) {
-      socket.emit('guessTooLate');
+      socket.emit('guessTooLate', { reason: 'opponent_was_faster' });
       return;
     }
 
@@ -1016,7 +1113,8 @@ io.on('connection', (socket) => {
     room.playerGuessResolved = true;
     clearTimer(room);
 
-    const elapsedMs = Math.max(0, Date.now() - (room.guessOpensAt || Date.now()));
+    // Scored from when the answer arrived, not from when the lookup finished.
+    const elapsedMs = Math.max(0, receivedAt - room.guessOpensAt);
     const points = pointsForSpeed(elapsedMs);
     room.scores[socket.id] = (room.scores[socket.id] || 0) + points;
 
@@ -1029,9 +1127,9 @@ io.on('connection', (socket) => {
     });
 
     if (room.round >= MAX_ROUNDS) {
-      room.timer = setTimeout(() => endGame(room), NEXT_ROUND_DELAY_MS);
+      room.timer = onThisAttempt(room, () => endGame(room), NEXT_ROUND_DELAY_MS);
     } else {
-      room.timer = setTimeout(() => startRound(room), NEXT_ROUND_DELAY_MS);
+      room.timer = onThisAttempt(room, () => startRound(room), NEXT_ROUND_DELAY_MS);
     }
   });
 

@@ -14,6 +14,11 @@ process.env.SQUAD_SNAPSHOT_PATH = require('path').join(__dirname, 'no-snapshot-o
 const realFetch = global.fetch;
 
 const CLUBS = {
+  // Deliberately NOT in server/data/teams.js. Every club in the built-in list
+  // resolves locally with no network call, so it cannot exercise the
+  // "club name still resolving when the round ends" race. This one has to go
+  // through the (mocked, delayable) Wikidata search.
+  'deneme kulubu': 'Q_CHELSEA',
   chelsea: 'Q_CHELSEA',
   liverpool: 'Q_LIVERPOOL',
   arsenal: 'Q_ARSENAL',
@@ -29,6 +34,9 @@ const PLAYERS = [
 ];
 
 /** Tests can slow the lookup down to exercise timing paths. */
+// Injectable lookup latency. Scoring is taken from when the answer arrived,
+// not from when the lookup finished, and that is only testable if the
+// slowness can be dialled in.
 const LOOKUP_DELAY_MS = Number(process.env.TEST_LOOKUP_DELAY_MS || 20);
 
 global.fetch = async (url) => {
