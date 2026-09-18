@@ -471,14 +471,51 @@ function makeRoomCode() {
   return code;
 }
 
+/** Still connected, and not already sitting in a live room. */
+function isAvailableForMatch(socket) {
+  if (!socket || !socket.connected) return false;
+  return !(socket.data.roomId && rooms.has(socket.data.roomId));
+}
+
+/** Takes a socket out of the random queue, wherever it sits. */
+function removeFromQueue(socket) {
+  const spot = queue.findIndex((s) => s.id === socket.id);
+  if (spot !== -1) queue.splice(spot, 1);
+}
+
+/** Drops any invite this socket is hosting. */
+function dropPendingInvite(socket) {
+  const code = socket.data.pendingCode;
+  if (code && codeRooms.get(code) && codeRooms.get(code).hostSocketId === socket.id) {
+    codeRooms.delete(code);
+  }
+  socket.data.pendingCode = null;
+}
+
+/**
+ * The single way a match comes into existence.
+ *
+ * Both players are checked together and, only if both are genuinely free, are
+ * they committed to the room and removed from every other waiting list in the
+ * same step. Doing this in one place is what stops a player being pulled into
+ * a second match: previously the queue and the invite list each handed out the
+ * same socket without knowing about the other.
+ *
+ * @returns {boolean} whether a room was actually created.
+ */
 function createRoom(socketA, socketB) {
-  // A room needs two distinct connections. Anything else is a bug upstream,
-  // and letting it through would produce a match a player plays against
-  // themselves.
   if (!socketA || !socketB || socketA.id === socketB.id) {
     console.error('createRoom called with one socket on both sides — ignoring');
-    return;
+    return false;
   }
+  if (!isAvailableForMatch(socketA) || !isAvailableForMatch(socketB)) return false;
+
+  // Commit both players before anything can await.
+  removeFromQueue(socketA);
+  removeFromQueue(socketB);
+  dropPendingInvite(socketA);
+  dropPendingInvite(socketB);
+
   const roomId = randomUUID();
   const room = {
     id: roomId,
@@ -513,6 +550,7 @@ function createRoom(socketA, socketB) {
 
   sendHeadToHead(room);
   startRound(room);
+  return true;
 }
 
 const accountIdOf = (socket) => (socket.data.account ? socket.data.account.id : null);
@@ -764,15 +802,17 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Drop anyone who left while sitting in the queue.
-    while (queue.length && (!queue[0].connected || queue[0].id === socket.id)) queue.shift();
-
-    if (queue.length > 0) {
-      createRoom(queue.shift(), socket);
-    } else {
-      queue.push(socket);
-      socket.emit('waiting');
+    // Pull opponents off the front until one is genuinely free. Someone who
+    // left, or who joined a friend's invite while waiting here, is stale.
+    while (queue.length) {
+      const opponent = queue.shift();
+      if (opponent.id === socket.id) continue;
+      if (!isAvailableForMatch(opponent)) continue;
+      if (createRoom(opponent, socket)) return;
     }
+
+    queue.push(socket);
+    socket.emit('waiting');
   });
 
   onSocketEvent(socket, 'createPrivateRoom', ({ name }) => {
@@ -824,18 +864,30 @@ io.on('connection', (socket) => {
     // socket — so a host who looks offline right now is usually just on their
     // way back. Give them a moment before writing the invite off.
     const hostSocket = await waitForConnectedSocket(entry.hostSocketId, HOST_WAIT_MS);
+
+    // That wait can be seconds long. In the meantime the joiner may have been
+    // matched from the queue, the host may have started a game, or the invite
+    // may have been claimed by someone else — so everything is re-checked
+    // against the state as it is now, not as it was before the await.
+    if (codeRooms.get(normalizedCode) !== entry) {
+      socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
+      return;
+    }
+    if (!isAvailableForMatch(socket)) return; // joiner already got a game
     if (!hostSocket) {
       codeRooms.delete(normalizedCode);
       socket.emit('errorMessage', { message: 'Oda sahibi çevrimdışı, yeni bir kod isteyin.' });
       return;
     }
-    if (hostSocket.data.roomId && rooms.has(hostSocket.data.roomId)) {
+    if (!isAvailableForMatch(hostSocket)) {
       socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
       return;
     }
 
     codeRooms.delete(normalizedCode);
-    createRoom(hostSocket, socket);
+    if (!createRoom(hostSocket, socket)) {
+      socket.emit('errorMessage', { message: 'Odaya girilemedi, tekrar dene.' });
+    }
   });
 
   onSocketEvent(socket, 'submitTeam', async ({ team } = {}) => {

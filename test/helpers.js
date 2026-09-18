@@ -19,10 +19,23 @@ const ROOT = path.join(__dirname, '..');
  */
 async function startTestServer(env = {}) {
   const port = 4000 + Math.floor(Math.random() * 1000);
+
+  // Inheriting the caller's environment would hand the test server whatever
+  // DATABASE_URL happens to be exported — including a production one. The
+  // server runs migrations and a session purge at startup, so that is a write
+  // to a live database, not a read. Tests start with NO database unless one is
+  // passed in explicitly, and a test that needs one must name it.
+  const inherited = { ...process.env };
+  delete inherited.DATABASE_URL;
+
   const child = fork(path.join(__dirname, 'fixtures', 'server-entry.js'), [], {
     cwd: ROOT,
     env: {
-      ...process.env,
+      ...inherited,
+      // Explicit empty string: config/brand.js and db.js both read this, and an
+      // absent key would let a parent shell value creep back in via any layer
+      // that merges environments.
+      DATABASE_URL: env.DATABASE_URL || '',
       PORT: String(port),
       NODE_ENV: env.NODE_ENV || 'test',
       // Limits exist to stop abuse, not to stop tests; each test drives one

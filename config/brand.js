@@ -33,7 +33,16 @@ module.exports = {
 
   /** npm paket adı ve dağıtım kimlikleri. */
   packageName: '3-2-1-futbol',
-  /** iOS bundle id / Android applicationId — mağazaya çıkarken sabitlenir. */
+  /**
+   * iOS bundle id / Android applicationId.
+   *
+   * DİKKAT: bu değer sahibinin adını yanlış yazıyor (sozgun → sezgin). Telif
+   * bildirimleri düzeltildi; bu kimlik bilerek DEĞİŞTİRİLMEDİ, çünkü App Store
+   * Connect veya Play Console'a bir kez kaydedilmiş bir bundle id'yi değiştirmek
+   * geri alınamaz: yeni bir uygulama kaydı gerekir ve mevcut kurulumlar,
+   * yorumlar ve satın almalar taşınmaz. Mağaza kaydı yapılmadığı doğrulanırsa
+   * `com.hasansezgin.futbol321` olarak düzeltilmeli.
+   */
   appId: 'com.hasansozgun.futbol321',
 
   themeColor: '#fa6b1d',

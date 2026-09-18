@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node server/index.js",
     "test": "node test/run.js",
+    "test:browser": "node test/browser/run.js",
     "dev": "node server/index.js",
     "build:squads": "node scripts/build-squads.js",
     "notices": "node scripts/third-party-notices.js",

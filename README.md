@@ -16,6 +16,37 @@ Wikidata User-Agent'ı, localStorage anahtarları — tek bir dosyadan okur:
 Tek istisna `storagePrefix`: değiştirmek giriş yapmış herkesin oturumunu
 düşürür, o yüzden önce bir geçiş kodu yazılmalı. Dosyadaki not bunu anlatır.
 
+## Testler
+
+```bash
+npm test                 # sunucu testleri — bağımlılıksız, veritabanı gerekmez
+npm run test:browser     # tarayıcı testleri — Playwright gerekir
+npm test -- socket       # tek test (isim filtresi)
+```
+
+**Veritabanı politikası.** Testler `DATABASE_URL` değerini **miras almaz** —
+test sunucusu açılışta migration ve oturum temizliği çalıştırdığı için, miras
+alınan bir üretim adresi canlı veriye yazmak demekti. Veritabanı isteyen
+testler yalnızca `TEST_DATABASE_URL` ile çalışır ve bu adres **atılabilir** bir
+veritabanını göstermelidir (tabloları `TRUNCATE` ederler). Tanımlı değilse o
+testler ATLANIR ve atlandıkları açıkça yazılır — geçmiş sayılmazlar.
+
+```bash
+TEST_DATABASE_URL=postgres://... npm run test:browser
+```
+
+| Test | Ne kanıtlıyor | DB |
+|---|---|---|
+| `socket-payloads` | 7 olaya 26 bozuk payload; her biri handler'a ulaşıyor (reddetme yanıtlarıyla kanıtlı), sunucu ayakta; 16 KB üstü payload sadece o bağlantıyı kapatıyor; oyun içi bozuk mesajlardan sonra tur normal tamamlanıyor | — |
+| `room-integrity` | Tekrarlı `joinQueue` tek maç; kendi davetine katılma reddi; tekrar davet aynı kodu döner | — |
+| `double-match` | Davet kabulü kuyruğu temizler; oyundaki oyuncu tekrar eşleşmez; başarılı katılım hata yaymaz; geçersiz kod sırayı düşürmez | — |
+| `browser/full-match` | 5 tur + tur sayacı sınırı + rövanş | — |
+| `browser/speed-scoring` | Hız kademeleri ve kaybedene gösterilen mesaj | — |
+| `browser/invite` | Davet linkiyle katılma akışı | — |
+| `browser/void-round` | Ortak oyuncu yoksa tur geçersiz ve tekrarlanır | — |
+| `browser/account-rights` | Hesap silme/dışa aktarma; silme rakibin geçmişini bozmaz | ✓ |
+| `browser/auth-security` | Jeton sadece başlıkta; çıkış oturumu bitirir; hesap bazlı kilitleme | ✓ |
+
 ## Veri ve gizlilik
 
 Uygulamanın gerçekte hangi veriyi topladığı, nerede tuttuğu ve nereye
