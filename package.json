@@ -7,6 +7,7 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
+    "test": "node test/run.js",
     "dev": "node server/index.js",
     "build:squads": "node scripts/build-squads.js",
     "notices": "node scripts/third-party-notices.js",
@@ -16,5 +17,8 @@
     "express": "^4.19.2",
     "pg": "^8.23.0",
     "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }

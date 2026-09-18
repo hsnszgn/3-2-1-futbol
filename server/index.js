@@ -346,7 +346,47 @@ const io = new Server(server, {
     maxDisconnectionDuration: 2 * 60 * 1000,
     skipMiddlewares: true,
   },
+  // Nothing this game sends is large. The default 1 MB ceiling is an open
+  // invitation to push megabytes of junk at the parser.
+  maxHttpBufferSize: 16 * 1024,
 });
+
+// --- socket event safety ----------------------------------------------------
+// Everything arriving on a socket is attacker-controlled and unauthenticated.
+// Two things follow from that.
+//
+// First, a payload is whatever the client felt like sending: null, a number, a
+// string, an array. Destructuring it directly throws, and a default parameter
+// (`= {}`) does NOT cover null, so every handler gets a normalised object.
+//
+// Second, a throw inside a handler is not caught by Socket.IO. It becomes an
+// uncaughtException, and the process-level policy then takes the whole server
+// down — every other game in progress with it. One bad client must only ever
+// break its own connection.
+const asPayload = (raw) => (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {});
+
+function onSocketEvent(socket, event, handler) {
+  socket.on(event, (raw) => {
+    const fail = (err) => {
+      console.error(`socket "${event}" failed for ${socket.id}:`, err && err.message);
+    };
+    let result;
+    try {
+      result = handler(asPayload(raw));
+    } catch (err) {
+      fail(err);
+      return;
+    }
+    // An async handler rejects long after the try/catch has returned.
+    if (result && typeof result.then === 'function') result.then(undefined, fail);
+  });
+}
+
+/** Free-text from a client: strings only, control characters stripped. */
+function cleanText(value, maxLength) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, maxLength);
+}
 
 // Runs before 'connection', so socket.data.account is already there when the
 // first joinQueue arrives. Recovered connections skip this and keep the data
@@ -356,13 +396,10 @@ const io = new Server(server, {
 // or an office behind one address would ever need.
 const MAX_SOCKETS_PER_IP = 25;
 
-// Anything arriving over a socket is attacker-controlled. Team names go on to
-// build a Wikidata search URL, so their length is bounded before they travel.
+// Team names go on to build a Wikidata search URL, so their length is bounded
+// before they ever travel.
 const MAX_INPUT_LENGTH = 64;
-const cleanInput = (value) => (typeof value === 'string' ? value : '')
-  .replace(/[\u0000-\u001f\u007f]/g, '')
-  .trim()
-  .slice(0, MAX_INPUT_LENGTH);
+const cleanInput = (value) => cleanText(value, MAX_INPUT_LENGTH);
 
 // A rejected team costs two Wikidata searches and does not end the round, so a
 // client could sit there spamming misses. Each socket gets a budget per round.
@@ -435,6 +472,13 @@ function makeRoomCode() {
 }
 
 function createRoom(socketA, socketB) {
+  // A room needs two distinct connections. Anything else is a bug upstream,
+  // and letting it through would produce a match a player plays against
+  // themselves.
+  if (!socketA || !socketB || socketA.id === socketB.id) {
+    console.error('createRoom called with one socket on both sides — ignoring');
+    return;
+  }
   const roomId = randomUUID();
   const room = {
     id: roomId,
@@ -703,27 +747,49 @@ io.on('connection', (socket) => {
     }
   }
 
-  socket.on('joinQueue', ({ name }) => {
-    const safeName = (name || '').toString().trim().slice(0, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
+  // One connection, one place in the world: either waiting, or in a game.
+  // Repeating the request is harmless but never gets you a second seat — two
+  // joinQueue events used to put the same socket in two different matches,
+  // leaving orphaned rooms and timers behind.
+  const isQueued = () => queue.some((s) => s.id === socket.id);
+  const isPlaying = () => Boolean(socket.data.roomId) && rooms.has(socket.data.roomId);
+
+  onSocketEvent(socket, 'joinQueue', ({ name }) => {
+    const safeName = cleanText(name, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
     socket.data.name = safeName;
 
-    if (queue.length > 0 && queue[0].id !== socket.id) {
-      const opponent = queue.shift();
-      if (!opponent.connected) {
-        queue.push(socket);
-        socket.emit('waiting');
-        return;
-      }
-      createRoom(opponent, socket);
+    if (isPlaying()) return;
+    if (isQueued()) {
+      socket.emit('waiting');
+      return;
+    }
+
+    // Drop anyone who left while sitting in the queue.
+    while (queue.length && (!queue[0].connected || queue[0].id === socket.id)) queue.shift();
+
+    if (queue.length > 0) {
+      createRoom(queue.shift(), socket);
     } else {
       queue.push(socket);
       socket.emit('waiting');
     }
   });
 
-  socket.on('createPrivateRoom', ({ name }) => {
-    const safeName = (name || '').toString().trim().slice(0, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
+  onSocketEvent(socket, 'createPrivateRoom', ({ name }) => {
+    const safeName = cleanText(name, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
     socket.data.name = safeName;
+
+    if (isPlaying()) return;
+    // Asking twice re-sends the code you already hold rather than minting a
+    // new invite on every click.
+    if (socket.data.pendingCode && codeRooms.has(socket.data.pendingCode)) {
+      socket.emit('privateRoomCreated', { code: socket.data.pendingCode });
+      return;
+    }
+    // A socket waiting for a friend should not also be in the random queue.
+    const spot = queue.findIndex((s) => s.id === socket.id);
+    if (spot !== -1) queue.splice(spot, 1);
+
     let code = makeRoomCode();
     while (codeRooms.has(code)) code = makeRoomCode();
     codeRooms.set(code, { hostSocketId: socket.id, createdAt: Date.now() });
@@ -731,12 +797,19 @@ io.on('connection', (socket) => {
     socket.emit('privateRoomCreated', { code });
   });
 
-  socket.on('joinPrivateRoom', async ({ name, code }) => {
-    const safeName = (name || '').toString().trim().slice(0, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
+  onSocketEvent(socket, 'joinPrivateRoom', async ({ name, code }) => {
+    const safeName = cleanText(name, 24) || `Oyuncu${Math.floor(Math.random() * 1000)}`;
     socket.data.name = safeName;
-    const normalizedCode = (code || '').toString().trim().toUpperCase();
+    const normalizedCode = cleanText(code, 12).toUpperCase();
     const entry = codeRooms.get(normalizedCode);
 
+    if (isPlaying()) return;
+    // Joining your own invite would build a room with the same socket on both
+    // sides — and, for a signed-in player, a match against themselves.
+    if (entry && entry.hostSocketId === socket.id) {
+      socket.emit('errorMessage', { message: 'Bu kod senin davetin — arkadaşına gönder.' });
+      return;
+    }
     if (!entry) {
       socket.emit('errorMessage', { message: 'Oda kodu bulunamadı ya da süresi doldu.' });
       return;
@@ -765,7 +838,7 @@ io.on('connection', (socket) => {
     createRoom(hostSocket, socket);
   });
 
-  socket.on('submitTeam', async ({ team } = {}) => {
+  onSocketEvent(socket, 'submitTeam', async ({ team } = {}) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'team-submit') return;
     if (room.teamSubs[socket.id]) return; // already submitted
@@ -811,7 +884,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('submitGuess', async ({ guess } = {}) => {
+  onSocketEvent(socket, 'submitGuess', async ({ guess } = {}) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'player-submit') return;
     const safeGuess = cleanInput(guess);
@@ -869,7 +942,7 @@ io.on('connection', (socket) => {
 
   // "Bir daha!" is the natural reflex after a game — keep the pair together
   // instead of sending them back to the lobby to re-match from scratch.
-  socket.on('requestRematch', () => {
+  onSocketEvent(socket, 'requestRematch', () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.state !== 'game-over') return;
 
@@ -889,7 +962,7 @@ io.on('connection', (socket) => {
     socket.to(room.id).emit('opponentWantsRematch');
   });
 
-  socket.on('leaveRoom', () => cleanupSocket(socket));
+  onSocketEvent(socket, 'leaveRoom', () => cleanupSocket(socket));
 
   socket.on('disconnect', () => {
     const idx = queue.findIndex((s) => s.id === socket.id);
