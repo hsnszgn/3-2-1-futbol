@@ -38,6 +38,21 @@ function dropTransport(socket) {
   socket.io.engine.close();
 }
 
+/**
+ * Waits for a dropped client to come back and proves it was a *recovery*, not a
+ * fresh connection. This matters: the whole pending-join problem only exists
+ * because the host keeps its socket id and socket.data across the drop. If the
+ * client silently reconnected as someone new, these tests would be green for
+ * the wrong reason — the stale invite would be unreachable rather than retired.
+ */
+async function recoverHost(socket, originalId, timeoutMs = 15000) {
+  await waitUntil(() => socket.connected, timeoutMs, 'host never reconnected');
+  assert.strictEqual(socket.id, originalId,
+    `host reconnected as a new socket (${originalId} -> ${socket.id}), so recovery did not happen`);
+  assert.strictEqual(socket.recovered, true,
+    'host reconnected without Socket.IO connection state recovery');
+}
+
 module.exports = async function run() {
   const server = await startTestServer();
   const notes = [];
@@ -141,6 +156,101 @@ module.exports = async function run() {
       notes.push('kuyruğa geçiş: eski davet isteği eşleştirmiyor');
       host.close();
       guest.close();
+    }
+
+    // --- 4. hosting your own invite retires the join you were waiting on ----
+    // Fourth audit, case A: createPrivateRoom never bumped the attempt, so a
+    // player who gave up waiting for a friend and started their own invite was
+    // still dragged into the old host's room when that host came back.
+    {
+      const host = await connectClient(server.url, {}, { reconnection: true, reconnectionDelay: 2500 });
+      const guest = await connectClient(server.url);
+
+      const created = waitFor(host, 'privateRoomCreated', 5000);
+      host.emit('createPrivateRoom', { name: 'Host' });
+      const { code } = await created;
+      const hostId = host.id;
+
+      const matched = [];
+      guest.on('matched', (m) => matched.push(m && m.opponentName));
+
+      dropTransport(host);
+      await sleep(150);
+
+      guest.emit('joinPrivateRoom', { name: 'Konuk', code });
+      await sleep(120);
+      // Changes their mind: they will host instead of joining.
+      const ownCode = waitFor(guest, 'privateRoomCreated', 5000);
+      guest.emit('createPrivateRoom', { name: 'Konuk' });
+      const own = await ownCode;
+      assert.ok(own && own.code, 'the player should get their own invite code');
+      assert.notStrictEqual(own.code, code, 'the new invite must be a different room');
+
+      await recoverHost(host, hostId);
+      await sleep(3000);
+
+      assert.deepStrictEqual(matched, [],
+        `the abandoned invite join still matched the player (${matched.join(', ')})`);
+      // And their own invite survived: retiring the old intent must not also
+      // throw away the new one.
+      const stillMine = waitFor(guest, 'privateRoomCreated', 5000);
+      guest.emit('createPrivateRoom', { name: 'Konuk' });
+      assert.strictEqual((await stillMine).code, own.code,
+        'the player lost their own invite code');
+
+      notes.push(`kendi davetini oluşturma: eski davet eşleştirmiyor, yeni kod korunuyor (host recovery doğrulandı, id ${hostId.slice(0, 6)}…)`);
+      host.close();
+      guest.close();
+    }
+
+    // --- 5. re-choosing a queue you are already in also retires it ----------
+    // Fourth audit, case B: joinQueue bumped the attempt only on the path that
+    // actually enqueued you. Already queued -> invite -> queue again took the
+    // "already waiting" shortcut and left the invite join alive.
+    {
+      const host = await connectClient(server.url, {}, { reconnection: true, reconnectionDelay: 2500 });
+      const guest = await connectClient(server.url);
+
+      const created = waitFor(host, 'privateRoomCreated', 5000);
+      host.emit('createPrivateRoom', { name: 'Host' });
+      const { code } = await created;
+      const hostId = host.id;
+
+      // The player is in the random queue FIRST — this is what made the second
+      // joinQueue hit the shortcut.
+      guest.emit('joinQueue', { name: 'Konuk' });
+      await waitFor(guest, 'waiting', 5000);
+
+      const matched = [];
+      guest.on('matched', (m) => matched.push(m && m.opponentName));
+
+      dropTransport(host);
+      await sleep(150);
+
+      guest.emit('joinPrivateRoom', { name: 'Konuk', code });
+      await sleep(120);
+      // Back to the queue. They are still in it, so this is the shortcut path.
+      guest.emit('joinQueue', { name: 'Konuk' });
+      await waitFor(guest, 'waiting', 5000);
+
+      await recoverHost(host, hostId);
+      await sleep(3000);
+
+      assert.deepStrictEqual(matched, [],
+        `the invite join matched even though the queue was the latest choice (${matched.join(', ')})`);
+
+      // The queue is still their real choice, so a normal opponent must pair.
+      const other = await connectClient(server.url);
+      const paired = waitFor(guest, 'matched', 8000);
+      other.emit('joinQueue', { name: 'Baska' });
+      const pairing = await paired;
+      assert.strictEqual(pairing.opponentName, 'Baska',
+        `the player should have been matched from the queue, got "${pairing.opponentName}"`);
+
+      notes.push(`kuyruğu yeniden seçme: davet eşleştirmiyor, kuyruktan normal eşleşme çalışıyor (host recovery doğrulandı, id ${hostId.slice(0, 6)}…)`);
+      host.close();
+      guest.close();
+      other.close();
     }
 
     assert.ok(server.isAlive(), 'server should still be running');

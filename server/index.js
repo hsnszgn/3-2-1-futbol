@@ -821,12 +821,18 @@ io.on('connection', (socket) => {
     socket.data.name = safeName;
 
     if (isPlaying()) return;
+    // Choosing the random queue retires any invite join still waiting — and it
+    // has to happen before the "already queued" shortcut below. With the bump
+    // after it, a player who was already queued, then asked to join a friend's
+    // invite, then changed their mind back to the queue kept the invite join
+    // alive: when the host came back, they were matched with the host despite
+    // the queue being their latest choice.
+    newJoinAttempt(socket);
+
     if (isQueued()) {
       socket.emit('waiting');
       return;
     }
-    // Choosing the random queue retires any invite join still waiting.
-    newJoinAttempt(socket);
 
     // Pull opponents off the front until one is genuinely free. Someone who
     // left, or who joined a friend's invite while waiting here, is stale.
@@ -846,6 +852,12 @@ io.on('connection', (socket) => {
     socket.data.name = safeName;
 
     if (isPlaying()) return;
+    // Hosting your own invite retires an invite join still waiting on someone
+    // else's host. This runs before the idempotent branch below for the same
+    // reason as in joinQueue: re-requesting your existing code is still a
+    // statement that you intend to host, not to join.
+    newJoinAttempt(socket);
+
     // Asking twice re-sends the code you already hold rather than minting a
     // new invite on every click.
     if (socket.data.pendingCode && codeRooms.has(socket.data.pendingCode)) {

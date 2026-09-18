@@ -62,7 +62,12 @@ const HOSTILE = [
 const REPLYING_EVENTS = [
   { event: 'joinQueue', reply: 'waiting' },
   { event: 'createPrivateRoom', reply: 'privateRoomCreated' },
-  { event: 'joinPrivateRoom', reply: 'errorMessage', extra: { code: 'YOKBOYLE' } },
+  // Every hostile payload normalises to an empty invite code, which the handler
+  // answers with "no such room". Nothing is merged into these payloads: an
+  // earlier version spread a valid-looking { code } over each one, which turned
+  // raw null and 42 into well-formed objects before they ever left the client —
+  // so the handler was never actually shown the malformed input.
+  { event: 'joinPrivateRoom', reply: 'errorMessage' },
 ];
 
 const SILENT_EVENTS = ['submitTeam', 'submitGuess', 'requestRematch', 'leaveRoom'];
@@ -74,7 +79,7 @@ module.exports = async function run() {
   try {
     // --- 1a. events that reply: delivery is counted, not assumed ------------
     let measured = 0;
-    for (const { event, reply, extra } of REPLYING_EVENTS) {
+    for (const { event, reply } of REPLYING_EVENTS) {
       const socket = await connectClient(server.url);
       let dropped = false;
       socket.on('disconnect', () => { dropped = true; });
@@ -85,15 +90,26 @@ module.exports = async function run() {
       let replies = 0;
       socket.on(reply, () => { replies += 1; });
 
-      for (const payload of HOSTILE) {
-        socket.emit(event, extra ? { ...(payload && typeof payload === 'object' ? payload : {}), ...extra } : payload);
-      }
+      // Sent exactly as they are — no client-side normalisation.
+      for (const payload of HOSTILE) socket.emit(event, payload);
       await sleep(600);
 
       assert.ok(!dropped, `connection was closed by hostile "${event}" payloads`);
       assert.strictEqual(replies, HOSTILE.length,
         `"${event}": server answered ${replies} of ${HOSTILE.length} hostile payloads`);
       measured += replies;
+      socket.close();
+    }
+
+    // A well-formed invite code that does not exist is a separate case: the
+    // sweep above only proves the empty-code path.
+    {
+      const socket = await connectClient(server.url);
+      const refused = waitFor(socket, 'errorMessage', 6000);
+      socket.emit('joinPrivateRoom', { name: 'Prob', code: 'YOKBOYLE' });
+      const message = (await refused).message;
+      assert.ok(/bulunamadı|süresi/i.test(message),
+        `an unknown invite code should be refused by name, got "${message}"`);
       socket.close();
     }
 

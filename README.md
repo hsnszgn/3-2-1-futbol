@@ -52,7 +52,8 @@ koşusu olarak ayrı raporlar.
 
 | Test | Ne kanıtlıyor | DB |
 |---|---|---|
-| `socket-payloads` | 26 bozuk payload × 7 olay. Yanıt veren 4 olayda (`joinQueue`, `createPrivateRoom`, `joinPrivateRoom`, oyun sonu `requestRematch`) teslim **sunucu yanıtları sayılarak** ölçülüyor; yanıt vermeyen 4 olayda kanıt yalnızca "bağlantı ayakta kaldı ve sonrasında çalıştı" (bunlar oyun içi bölümde reddetme yanıtlarıyla ayrıca kanıtlanıyor). 16 KB üstü payload **sadece** o bağlantıyı kapatıyor — kapanmazsa test başarısız olur — ve o sırada oynanan maç etkilenmiyor | — |
+| `socket-payloads` | 26 bozuk payload × 7 olay, payload'lar **hiç değiştirilmeden** gönderiliyor. Teslim ölçümü yanıt veren olaylarda sunucu yanıtları sayılarak yapılıyor: `joinQueue`, `createPrivateRoom`, `joinPrivateRoom` (26'sı da ayrı yanıt) ve oyun sonu `requestRematch` (26 yanıt) + oyun içi `submitTeam` (26 ayrı reddetme). Kalan olaylarda kanıt daha zayıf: `submitGuess` için yalnızca **bir** normal yanlış tahmin reddi var, `leaveRoom` için oyun içi reddetme ölçümü **yok** — bu ikisinde bozuk payload'lar için iddia "bağlantı ayakta kaldı ve sonrasında çalıştı" ile sınırlı. 16 KB üstü payload **sadece** o bağlantıyı kapatıyor — kapanmazsa test başarısız olur — ve o sırada oynanan maç etkilenmiyor | — |
+| `pending-join` | Host'u beklerken: yinelenen davet hata yaymıyor, `leaveRoom` iptal ediyor, kuyruğa geçiş / **kendi davetini oluşturma** / **zaten kuyruktayken kuyruğu yeniden seçme** eski daveti geçersizleştiriyor. Host'un gerçekten recovery yaptığı (aynı socket id + `recovered`) testte doğrulanıyor | — |
 | `room-integrity` | Tekrarlı `joinQueue` tek maç; kendi davetine katılma reddi; tekrar davet aynı kodu döner | — |
 | `double-match` | Davet kabulü kuyruğu temizler; oyundaki oyuncu tekrar eşleşmez; başarılı katılım hata yaymaz; geçersiz kod sırayı düşürmez | — |
 | `browser/full-match` | 5 tur + tur sayacı sınırı + rövanş | — |
