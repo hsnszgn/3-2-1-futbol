@@ -138,7 +138,7 @@ async function login(rawUsername, password) {
  * extra live token behind. This answers the only question being asked.
  */
 async function verifyCredentials(playerId, password) {
-  if (!db.isEnabled()) return false;
+  if (!db.isReady()) return false;
   const { rows } = await db.query(
     'SELECT password_hash FROM players WHERE id = $1 AND deleted_at IS NULL',
     [playerId],
@@ -158,7 +158,7 @@ async function createSession(playerId) {
 }
 
 async function playerForToken(token) {
-  if (!token || !db.isEnabled()) return null;
+  if (!token || !db.isReady()) return null;
   const { rows } = await db.query(
     `SELECT p.id, p.username, p.display_name
      FROM sessions s JOIN players p ON p.id = s.player_id
@@ -170,7 +170,7 @@ async function playerForToken(token) {
 
 /** Signing out has to end the session on the server, not just in the browser. */
 async function endSession(token) {
-  if (!token || !db.isEnabled()) return;
+  if (!token || !db.isReady()) return;
   await db.query('DELETE FROM sessions WHERE token = $1', [String(token)]);
 }
 
@@ -179,14 +179,14 @@ async function endSession(token) {
  * available for a "sign out everywhere" action.
  */
 async function endAllSessions(playerId) {
-  if (!db.isEnabled()) return 0;
+  if (!db.isReady()) return 0;
   const { rowCount } = await db.query('DELETE FROM sessions WHERE player_id = $1', [playerId]);
   return rowCount;
 }
 
 /** Expired rows are dead weight; clear them out periodically. */
 async function purgeExpiredSessions() {
-  if (!db.isEnabled()) return 0;
+  if (!db.isReady()) return 0;
   const { rowCount } = await db.query('DELETE FROM sessions WHERE expires_at <= now()');
   return rowCount;
 }

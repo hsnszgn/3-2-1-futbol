@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Iki oyunculu gercek zamanli futbol takim/futbolcu isim oyunu",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "license": "UNLICENSED",
   "main": "server/index.js",
   "scripts": {

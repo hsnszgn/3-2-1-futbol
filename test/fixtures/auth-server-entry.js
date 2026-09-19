@@ -31,6 +31,8 @@ const LOOKUP_DELAY_MS = Number(process.env.AUTH_LOOKUP_DELAY_MS) || 3000;
 let mode = 'normal';
 
 db.isEnabled = () => true;
+// Configured AND ready: this fixture stands in for a working database.
+db.isReady = () => true;
 db.migrate = async () => true;
 accounts.purgeExpiredSessions = async () => 0;
 

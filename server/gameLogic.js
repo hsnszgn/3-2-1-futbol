@@ -15,23 +15,52 @@ function levenshtein(a, b) {
   return dp[m][n];
 }
 
+// The shortest guess worth treating loosely. Below this, one edit is most of
+// the word: "ba" would reach "be", "de" would reach "da". Short answers have to
+// be exact, and an exact answer is already matched before any of this runs.
+const MIN_FUZZY_LENGTH = 4;
+
 function isTypo(candidate, guess) {
+  if (guess.length < MIN_FUZZY_LENGTH || candidate.length < MIN_FUZZY_LENGTH) return false;
   const threshold = Math.max(candidate.length, guess.length) <= 6 ? 1 : 2;
   return levenshtein(candidate, guess) <= threshold;
 }
 
-// "Muriqi" should count for "Vedat Muriqi", and "Hakan Calhanoglu" for
-// "Hakan Çalhanoğlu" — but a single short token like "de" shouldn't match
-// half the database.
+/**
+ * Does this guess actually pick someone out?
+ *
+ * "Muriqi" should count for "Vedat Muriqi", and "Hakan Calhanoglu" for
+ * "Hakan Çalhanoğlu". "de de" should not count for Kevin De Bruyne — and it
+ * did: the multi-token branch only asked whether every token appeared
+ * somewhere in the name, so repeating a particle was enough. Typing "de de"
+ * scored a point against anyone with a "de" in their name.
+ *
+ * Two rules fix it without narrowing what a real player would type:
+ *
+ *   - Repeating a token adds nothing, so duplicates are dropped first. "de de"
+ *     becomes "de", which the single-token rule already refuses as too short.
+ *   - What is left has to carry some weight: either a token of real length, or
+ *     the player's surname. "van der sar" passes on the surname even though
+ *     none of its parts is long; "van der" alone does not, and should not.
+ *
+ * Order is deliberately not required: "salah mohamed" is a normal way to answer.
+ */
 function isPartialName(candidateTokens, guessTokens) {
-  if (!guessTokens.length) return false;
-  if (guessTokens.length === 1) {
-    const token = guessTokens[0];
-    if (token.length < 4) return false;
-    return candidateTokens[candidateTokens.length - 1] === token
-      || candidateTokens.includes(token);
+  if (!guessTokens.length || !candidateTokens.length) return false;
+
+  const distinct = [...new Set(guessTokens)];
+  if (distinct.length === 1) {
+    const token = distinct[0];
+    if (token.length < MIN_FUZZY_LENGTH) return false;
+    return candidateTokens.includes(token);
   }
-  return guessTokens.every((t) => candidateTokens.includes(t));
+
+  if (!distinct.every((t) => candidateTokens.includes(t))) return false;
+
+  const surname = candidateTokens[candidateTokens.length - 1];
+  const carriesWeight = distinct.some((t) => t.length >= MIN_FUZZY_LENGTH)
+    || distinct.includes(surname);
+  return carriesWeight;
 }
 
 /**
@@ -67,8 +96,9 @@ function matchPlayerName(input, candidates) {
       }
       // A mistyped surname on its own ("Calhanoglou") is a very common way to
       // answer under time pressure, so check tokens individually too.
-      if (!partialTypoMatch && guessTokens.length === 1 && guessTokens[0].length >= 4
-        && candidateTokens.some((t) => t.length >= 4 && isTypo(t, guessTokens[0]))) {
+      if (!partialTypoMatch && guessTokens.length === 1
+        && guessTokens[0].length >= MIN_FUZZY_LENGTH
+        && candidateTokens.some((t) => isTypo(t, guessTokens[0]))) {
         partialTypoMatch = candidate.name;
       }
     }

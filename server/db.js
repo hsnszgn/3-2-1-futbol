@@ -21,11 +21,29 @@ if (CONNECTION_STRING) {
     ssl: /localhost|127\.0\.0\.1/.test(CONNECTION_STRING) ? false : { rejectUnauthorized: false },
     max: 5,
     idleTimeoutMillis: 30000,
+    // Bounded waits, so a database that has gone away fails the request instead
+    // of holding it open. Without these, an outage does not produce errors — it
+    // produces a page that never finishes loading, which is worse, because
+    // nothing anywhere says what is wrong.
+    connectionTimeoutMillis: Number(process.env.DB_CONNECT_TIMEOUT_MS) || 8000,
+    query_timeout: Number(process.env.DB_QUERY_TIMEOUT_MS) || 10000,
+    statement_timeout: Number(process.env.DB_QUERY_TIMEOUT_MS) || 10000,
   });
   pool.on('error', (err) => console.error('Postgres pool error:', err.message));
 }
 
+// CONFIGURED: a connection string was supplied and a pool exists.
 const isEnabled = () => Boolean(pool);
+
+// READY: configured, and the schema is actually in place.
+//
+// These were the same thing, and they are not. A failed migration left
+// isEnabled() true, so /api/config still announced that accounts worked, the
+// sign-up form still appeared, and every attempt to use it failed against
+// tables that were not there. "We have a connection string" is not "this
+// works".
+let schemaReady = false;
+const isReady = () => Boolean(pool) && schemaReady;
 
 async function query(text, params) {
   if (!pool) throw new Error('database not configured');
@@ -135,9 +153,11 @@ async function migrate() {
   }
   try {
     await pool.query(SCHEMA);
+    schemaReady = true;
     console.log('Database ready');
     return true;
   } catch (err) {
+    schemaReady = false;
     console.error('Database migration failed:', err.message);
     return false;
   }
@@ -166,4 +186,4 @@ async function close() {
   if (pool) await pool.end().catch(() => {});
 }
 
-module.exports = { isEnabled, query, transaction, migrate, close, STATS_SELECT };
+module.exports = { isEnabled, isReady, query, transaction, migrate, close, STATS_SELECT };

@@ -71,13 +71,15 @@ app.use((req, res, next) => {
   // Invite links carry a room code; don't hand it to whatever is linked next.
   res.set('Referrer-Policy', 'no-referrer');
   res.set('Permissions-Policy', 'geolocation=(), camera=(), microphone=(), payment=()');
-  // Everything the page loads is either ours or Google Fonts; nothing else may
-  // run, and nothing may frame us.
+  // Everything the page loads is ours. The fonts were the one exception and are
+  // now served from here too, so the policy no longer names anybody else —
+  // which is also what makes it enforce the change: if a stray external font
+  // request came back, the browser would refuse it rather than quietly make it.
   res.set('Content-Security-Policy', [
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self'",
     "img-src 'self' data:",
     "connect-src 'self' ws: wss:",
     "frame-ancestors 'none'",
@@ -179,10 +181,19 @@ const limitDebug = createLimiter('debug', envInt('RATE_DEBUG', 20), 60 * 1000);
 // production they exist only for whoever holds DEBUG_TOKEN.
 const DEBUG_TOKEN = process.env.DEBUG_TOKEN || '';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+/**
+ * The debug endpoints, in production, behind a header-only token.
+ *
+ * It used to accept `?key=<token>` as well, which is the same mistake this
+ * project already refused for session tokens: a secret in a URL ends up in
+ * server logs, in browser history, and in the Referer header sent to whatever
+ * the page links to next. A header goes to none of those.
+ *
+ *   curl -H 'X-Debug-Token: <token>' https://…/debug/lookup?a=Chelsea&b=Liverpool
+ */
 function requireDebugAccess(req, res, next) {
   if (!IS_PRODUCTION) return next();
   if (DEBUG_TOKEN && req.get('x-debug-token') === DEBUG_TOKEN) return next();
-  if (DEBUG_TOKEN && req.query.key === DEBUG_TOKEN) return next();
   return res.status(404).type('text').send('Not found');
 }
 
@@ -192,8 +203,15 @@ app.use('/api', limitApi);
 // All of these answer 503 when DATABASE_URL isn't set, so the game itself
 // keeps working with accounts simply switched off.
 function requireDb(res) {
-  if (db.isEnabled()) return true;
-  res.status(503).json({ reason: 'accounts_disabled' });
+  if (db.isReady()) return true;
+  // Two different situations, and the client deserves to be able to tell them
+  // apart: accounts were never set up here, versus they are set up and
+  // currently broken. Both refuse the request; only one is a fault.
+  if (!db.isEnabled()) {
+    res.status(503).json({ reason: 'accounts_disabled' });
+  } else {
+    res.status(503).json({ reason: 'accounts_unavailable' });
+  }
   return false;
 }
 
@@ -309,7 +327,14 @@ app.get('/api/profile/:username', wrap(async (req, res) => {
 
 app.get('/api/config', (req, res) => {
   res.json({
-    accountsEnabled: db.isEnabled(),
+    // Whether the account features actually WORK right now. The client hides
+    // the whole sign-in surface when this is false, which is the point: a
+    // database that is configured but unmigrated must not present a form that
+    // cannot succeed.
+    accountsEnabled: db.isReady(),
+    // Configured but not ready means something is wrong, as opposed to a
+    // deployment that simply runs without accounts.
+    accountsConfigured: db.isEnabled(),
     minPasswordLength: accounts.MIN_PASSWORD_LENGTH,
     tiers: accounts.TIERS,
     activityRanks: accounts.ACTIVITY_RANKS,
@@ -722,7 +747,7 @@ function clearTimer(room) {
 // nothing rather than a misleading 0-0.
 async function sendHeadToHead(room) {
   const [a, b] = room.players;
-  if (!db.isEnabled() || !a.accountId || !b.accountId) return;
+  if (!db.isReady() || !a.accountId || !b.accountId) return;
   try {
     const tally = await accounts.headToHead(a.accountId, b.accountId);
     if (!tally.games) return;
@@ -1010,7 +1035,7 @@ async function saveMatch(room, { scoreA, scoreB, winnerSocketId, gameId }) {
   // The account ids, by contrast, are read AFTER the wait on purpose: the whole
   // point of waiting is that the answer may be "this player is signed out", and
   // then their seat has been cleared and nothing is recorded.
-  if (!db.isEnabled() || !a.accountId || !b.accountId) return;
+  if (!db.isReady() || !a.accountId || !b.accountId) return;
   const winnerId = winnerSocketId === a.socketId ? a.accountId
     : winnerSocketId === b.socketId ? b.accountId
     : null;
@@ -1610,11 +1635,28 @@ server.listen(PORT, () => {
   console.log(`${brand.name} server listening on port ${bound ? bound.port : PORT}`);
   // Creating the tables is safe to repeat, and a failure here only disables
   // accounts — the game itself must still come up.
-  db.migrate().then((ready) => {
-    if (!ready) return;
+  //
+  // It is also retried. A database that is slow to accept connections at deploy
+  // time used to disable accounts until somebody noticed and redeployed; the
+  // schema is one idempotent statement, so trying again costs nothing and the
+  // service heals itself when the database comes back.
+  const MIGRATE_RETRY_MS = Number(process.env.MIGRATE_RETRY_MS) || 60000;
+  const startPurgeLoop = () => {
     const purge = () => accounts.purgeExpiredSessions()
       .catch((err) => console.error('session purge failed:', err.message));
     purge();
     setInterval(purge, 6 * 60 * 60 * 1000).unref();
-  });
+  };
+
+  const tryMigrate = () => {
+    db.migrate().then((ready) => {
+      if (ready) {
+        startPurgeLoop();
+        return;
+      }
+      if (!db.isEnabled()) return; // no database configured; nothing to retry
+      setTimeout(tryMigrate, MIGRATE_RETRY_MS).unref();
+    });
+  };
+  tryMigrate();
 });

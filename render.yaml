@@ -6,17 +6,25 @@ services:
     # The squad snapshot is built here, where there is internet and no round
     # waiting on it. It never fails the deploy: without it the server just
     # falls back to live Wikidata lookups.
-    buildCommand: npm install && npm run build:squads
+    # npm ci, not npm install: it installs exactly what package-lock.json says.
+    # npm install is allowed to resolve a newer version than the lockfile pins,
+    # so the thing that gets deployed need not be the thing that was tested.
+    buildCommand: npm ci && npm run build:squads
     startCommand: npm start
     envVars:
+      # Node 24 is the active LTS (Krypton): security support to April 2028.
+      # Node 20 was off the release schedule entirely — running an unsupported
+      # runtime in production means no security patches.
       - key: NODE_VERSION
-        value: 20.11.0
+        value: 24.21.0
       # Turns on the production posture: the /debug/* endpoints stop answering
       # unless DEBUG_TOKEN is set and supplied.
       - key: NODE_ENV
         value: production
-      # Optional. Set it to reopen /debug/* for yourself:
-      #   /debug/lookup?a=Chelsea&b=Liverpool&key=<token>
+      # Optional. Set it to reopen /debug/* for yourself. The token goes in a
+      # HEADER, not the query string — a secret in a URL lands in server logs,
+      # browser history and the Referer header:
+      #   curl -H 'X-Debug-Token: <token>' '.../debug/lookup?a=Chelsea&b=Liverpool'
       - key: DEBUG_TOKEN
         sync: false
       # The canonical address, used for share links, og:url and the manifest.

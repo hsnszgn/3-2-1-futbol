@@ -615,38 +615,61 @@ module.exports = async function run({ databaseUrl }) {
       notes.push('tarihsel bozuk satır varken migration geçti (kısıt NOT VALID kaldı), eski satır korundu, yeni bozuk satır reddedildi');
     }
 
-    // --- 9. a route that throws answers, rather than hanging -----------------
+    // --- 9. a query that cannot finish fails the request, and fast ------------
     // Express 4 does not catch a rejection from an async handler, so a failing
     // route used to answer nothing at all: the client waited out its own
-    // timeout, which looks exactly like the server being down. Found while
-    // reproducing the deletion collision above — the UNIQUE violation hung that
-    // request for almost six minutes instead of failing it.
+    // timeout, which looks exactly like the server being down.
     //
-    // A separate server is pointed at a database that is not there. isEnabled()
-    // is true (the pool exists), so the request goes through to a query that
-    // cannot succeed — the only way to reach the throwing path deliberately.
+    // Reaching that path takes some care. Pointing a server at an unreachable
+    // database no longer works — since configured and ready became separate,
+    // such a server refuses the request with 503 before any query is attempted,
+    // which is the right behaviour and the wrong test. So the database here is
+    // real and READY, and a query is made impossible instead: a lock the request
+    // cannot get past, and a short statement timeout to end the wait. That also
+    // exercises the timeout itself, which is what stops an outage from becoming
+    // a page that never loads.
     {
-      const broken = await startTestServer({ DATABASE_URL: 'postgres://nobody@127.0.0.1:1/yok' });
+      const timed = await startTestServer({
+        DATABASE_URL: databaseUrl,
+        DB_QUERY_TIMEOUT_MS: '1500',
+      });
+      const blocker = await openDb(databaseUrl);
       try {
+        const registered = await registerAccount(timed, 'kilit_kurbani');
+
+        await blocker.query('BEGIN');
+        // ACCESS EXCLUSIVE conflicts with plain SELECT too, so the session
+        // lookup cannot proceed at all.
+        await blocker.query('LOCK TABLE players IN ACCESS EXCLUSIVE MODE');
+
         const started = Date.now();
-        const res = await fetch(`${broken.url}/api/me`, {
-          headers: { Authorization: 'Bearer herhangi' },
+        const res = await fetch(`${timed.url}/api/me`, {
+          headers: { Authorization: `Bearer ${registered.token}` },
         });
         const took = Date.now() - started;
 
-        assert.strictEqual(res.status, 500, `expected 500 from a broken database, got ${res.status}`);
+        assert.strictEqual(res.status, 500,
+          `a query that cannot finish should fail the request, got ${res.status}`);
         const body = await res.json().catch(() => ({}));
         assert.strictEqual(body.error, 'server_error', `unexpected body: ${JSON.stringify(body)}`);
-        assert.ok(took < 8000, `the request took ${took}ms — it should fail, not hang`);
-        assert.ok(broken.isAlive(), 'a failing request killed the server');
+        assert.ok(took < 8000, `the request took ${took}ms — it should time out, not hang`);
+        assert.ok(timed.isAlive(), 'a failing request killed the server');
 
-        // The game itself does not need the database and still works.
-        const health = await fetch(`${broken.url}/healthz`);
-        assert.strictEqual(health.status, 200, 'the server stopped answering after a failed query');
+        await blocker.query('COMMIT');
 
-        notes.push(`veritabanı ölüyken istek ${took}ms içinde 500 döndü (askıda kalmıyor), sunucu ayakta`);
+        // And once the lock is gone, the same request works again: the timeout
+        // fails one request, it does not poison the pool.
+        const after = await fetch(`${timed.url}/api/me`, {
+          headers: { Authorization: `Bearer ${registered.token}` },
+        });
+        assert.strictEqual(after.status, 200,
+          `the account stopped working after a timed-out query (${after.status})`);
+
+        notes.push(`bitemeyen sorgu ${took}ms içinde 500 ile başarısız oldu (askıda kalmadı), kilit kalkınca aynı istek 200`);
       } finally {
-        await broken.stop();
+        await blocker.query('ROLLBACK').catch(() => {});
+        await blocker.end().catch(() => {});
+        await timed.stop();
       }
     }
 

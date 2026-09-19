@@ -60,6 +60,8 @@ CHROMIUM_PATH=/opt/pw-browsers/chromium npm run test:browser
 ```
 
 Bu depodaki sonuçlar **Playwright 1.56.1 + Chromium 141.0.7390.37** ile alındı.
+Sunucu tarafı hem **Node 22.22.2** hem **Node 24.21.0** (üretimde pinli LTS)
+üzerinde koşuldu.
 Koşucu her çalıştırmada kullandığı sürümleri ve veritabanının bağlı olup
 olmadığını başlıkta yazar, sonucu da "veritabanısız" ve "izole PostgreSQL"
 koşusu olarak ayrı raporlar.
@@ -69,6 +71,8 @@ koşusu olarak ayrı raporlar.
 | `socket-payloads` | 26 bozuk payload × 7 olay, payload'lar **hiç değiştirilmeden** gönderiliyor. Teslim ölçümü yanıt veren olaylarda sunucu yanıtları sayılarak yapılıyor: `joinQueue`, `createPrivateRoom`, `joinPrivateRoom` (26'sı da ayrı yanıt) ve oyun sonu `requestRematch` (26 yanıt) + oyun içi `submitTeam` (26 ayrı reddetme). Kalan olaylarda kanıt daha zayıf: `submitGuess` için yalnızca **bir** normal yanlış tahmin reddi var, `leaveRoom` için oyun içi reddetme ölçümü **yok** — bu ikisinde bozuk payload'lar için iddia "bağlantı ayakta kaldı ve sonrasında çalıştı" ile sınırlı. 16 KB üstü payload **sadece** o bağlantıyı kapatıyor — kapanmazsa test başarısız olur — ve o sırada oynanan maç etkilenmiyor | — |
 | `round-timing` | Tur/süre modeli: cevap penceresini sunucu belirleyip yayınlıyor (`teamsRevealed.opensInMs` + `openGuess.timeoutMs`); açılıştan önce gelen cevap `guessTooEarly` ile reddediliyor (eskiden bedava +3 alıyordu); puan **arama gecikmesinden bağımsız** (20ms ve 4000ms/istek aramada aynı puan); **+3/+2/+1 kademeleri 5s ve 12s eşiklerinin iki yanında** ölçülüyor (4.3s/5.7s ve 11.3s/12.7s); süresi geçmiş turun uçuştaki cevabı sonraki tura yazılmıyor; geç çözülen takım adı iptal olmuş denemeden tekrara taşınmıyor | — |
 | `recovery` | Yeniden bağlanma: çevrimdışıyken kuyruğa giren takım/cevap sonraki denemeye taşınmıyor (`stale_round`, deneme bütçesi harcanmadan); dönen oyuncuya replay edilen olayın eski süresi değil **mutlak bitiş zamanından hesaplanan gerçek kalan süre** veriliyor; `phaseSync` odanın güncel halini gönderiyor. Her senaryoda host/oyuncunun gerçekten recovery yaptığı (aynı socket id + `recovered`) doğrulanıyor | — |
+| `name-matching` | Futbolcu adı eşleştirmesi: 20 kabul + 18 ret örneği. `"de de"` artık Kevin De Bruyne'ü eşleştirmiyor (tekrarlı parçacıklar, tek başına `de`/`van`/`di`, 3 harften kısa bulanık eşleşme reddediliyor); soyadı, ters sıra, takma ad, Türkçe karakterler, tire/nokta ve olağan yazım hataları kabul edilmeye devam ediyor | — |
+| `account-readiness` | "Bağlantı adresi var" ile "bu çalışıyor" ayrımı: veritabanı yokken `accounts_disabled`, varken-ama-bozukken `accounts_unavailable` (ikisi de 503, hesap arayüzü görünmüyor); istek askıda kalmıyor; veritabanı bozukken misafir maçı baştan sona oynanıyor; başarısız migration yeniden deneniyor | — |
 | `pending-join` | Host'u beklerken: yinelenen davet hata yaymıyor, `leaveRoom` iptal ediyor, kuyruğa geçiş / **kendi davetini oluşturma** / **zaten kuyruktayken kuyruğu yeniden seçme** eski daveti geçersizleştiriyor. Host'un gerçekten recovery yaptığı (aynı socket id + `recovered`) testte doğrulanıyor | — |
 | `session-revocation` | Oturum iptali: doğrulama sürerken hesap yetkisi kullanılamıyor (gecikmeli **ve hatalı** aramada ikisi de), arama hatasında kimlik **korunmuyor** (fail-closed); çevrimdışıyken çıkış maç koltuğunu temizliyor ve maç kaydedilmiyor; jetona özel çıkış aynı hesabın diğer oturumunu düşürmüyor; **davet yolu** da host doğrulanmadan oda kurmuyor (bariyer yalnız olayı gönderen soketi tutar, oda iki taraflıdır); kimlik doğrulama gecikmesi **puanı etkilemiyor** ve bariyerde bekletilen erken cevap varış zamanına göre reddediliyor; **kayıt beklerken başlayan rövanş** biten oyunun kimliğini çalmıyor. Hesap servisi kontrollü bir çift — bir aramayı istenen anda yavaşlatmak ya da hata verdirmek gerçek veritabanıyla yapılamaz; geri kalan her şey üretim yolu | — |
 | `room-integrity` | Tekrarlı `joinQueue` tek maç; kendi davetine katılma reddi; tekrar davet aynı kodu döner | — |
@@ -76,6 +80,7 @@ koşusu olarak ayrı raporlar.
 | `double-match` | Davet kabulü kuyruğu temizler; oyundaki oyuncu tekrar eşleşmez; başarılı katılım hata yaymaz; geçersiz kod sırayı düşürmez | — |
 | `browser/full-match` | 5 tur + tur sayacı sınırı + rövanş | — |
 | `browser/logout-mid-match` | Gerçek tarayıcıda maç sırasında çıkış: istemci bağlantısını **değiştirmiyor**, tur misafir olarak tamamlanıyor, hesap kartı kapanıyor. Bağlantıyı değiştiren istemcinin sunucuda odası olmadığı için turun ilerlemesi bunun kanıtı | ✔ |
+| `browser/fonts-local` | Sayfa dışarıdan **hiçbir şey** istemiyor (gerçek ağ izleniyor), yazı tipleri kendi sunucumuzdan yükleniyor ve Türkçe harfler gerçek yüzle çiziliyor (yedek fonta düşmüyor) | — |
 | `browser/second-match` | Aynı istemcide iki ardışık maç. Deneme sayacı her odada sıfırdan saydığı için, ikinci maçın olayları birincisinden "daha eski" görünüp yok sayılabiliyordu — oyuncu ilerlemeyen bir ekranda kalıyordu | — |
 | `browser/speed-scoring` | Tarayıcıda en hızlı kademe (+3) ve kaybedene gösterilen mesaj. +2/+1 kademeleri ve gecikmeden bağımsızlık **tarayıcıda değil**, `round-timing` içinde socket seviyesinde doğrulanıyor | — |
 | `browser/invite` | Davet linkiyle katılma akışı | — |
@@ -145,6 +150,17 @@ Oyun yakın çevrenin dışına açılacağı için hesap tarafı şu şekilde s
 - Şifre en az 6 karakter, JSON gövdesi en fazla 8 KB, tek bir IP'den en fazla
   25 eşzamanlı soket (kuyruğu hayalet oyuncularla doldurmayı engellemek için).
 - `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` başlıkları.
+- **Yazı tipleri kendi sunucumuzdan** (`public/fonts/`, SIL OFL 1.1, lisans
+  metinleri yanında). Eskiden Google'dan çekiliyordu: sayfa kendi yazısını
+  çizebilmek için üçüncü bir tarafın ayakta olmasına bağımlıydı ve her
+  ziyaretçinin isteği (IP'siyle birlikte) oraya gidiyordu. CSP artık dışarıdan
+  hiçbir kaynağa izin vermiyor, yani geri gelen bir dış istek sessizce
+  çalışmaz, tarayıcı tarafından reddedilir.
+
+**Bu liste ne değildir:** yapılmış sıkılaştırmaların kaydıdır, "güvenlik
+denetimi tamamlandı" demek değildir. Aşağıdaki test tablosu hangi iddianın
+hangi testle karşılandığını gösterir; tabloda karşılığı olmayan bir cümle
+kanıtlanmış sayılmamalıdır.
 
 ### Kurulum (Postgres)
 
@@ -155,8 +171,21 @@ Postgres'te durur (Neon'un ücretsiz planı fazlasıyla yeter):
 2. Verdiği bağlantı adresini (`postgres://...`) kopyala.
 3. Render'da servisin **Environment** sekmesine `DATABASE_URL` adıyla ekle.
 
-Tablolar ilk açılışta kendiliğinden oluşur. `DATABASE_URL` tanımlı değilse
-hesap sistemi tamamen kapalı kalır ve oyun eskisi gibi çalışır.
+Tablolar ilk açılışta kendiliğinden oluşur ve başarısız olursa belirli
+aralıklarla yeniden denenir (`MIGRATE_RETRY_MS`, varsayılan 60s).
+
+Üç ayrı durum var ve `/api/config` bunları ayırt eder:
+
+| Durum | `accountsConfigured` | `accountsEnabled` | Davranış |
+|---|---|---|---|
+| `DATABASE_URL` yok | `false` | `false` | Hesap arayüzü hiç görünmez, oyun eskisi gibi çalışır |
+| Var ama şema kurulamadı | `true` | `false` | Hesap arayüzü **yine görünmez**; API `503 accounts_unavailable` döner |
+| Var ve şema hazır | `true` | `true` | Hesaplar çalışır |
+
+İkinci satır bilerek böyle: "bağlantı adresi var" ile "bu çalışıyor" aynı şey
+değil. Migration başarısızken hesap formunu göstermek, oyuncuya çalışmayan bir
+özellik sunmak olurdu. Veritabanı erişilemezken istekler **askıda kalmaz**,
+sınırlı sürede hata döner (`connectionTimeoutMillis` / `query_timeout`).
 
 ## Kurulum
 
