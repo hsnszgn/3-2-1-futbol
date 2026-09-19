@@ -38,7 +38,13 @@ document.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
 Accounts.onChange((player) => {
   socket.auth = { token: Accounts.getToken() };
   if (player && !nameInput.value.trim()) nameInput.value = player.displayName;
-  if (socket.connected) {
+
+  // A new token only reaches the server through a new handshake, so signing in
+  // reconnects. Signing OUT must not: the server has already taken the identity
+  // off this very connection, and a deliberate reconnect is not a recovery — it
+  // gets a new socket with no room, which left a player staring at a game screen
+  // whose submissions went nowhere. The match carries on as a guest instead.
+  if (player && socket.connected) {
     socket.disconnect();
     socket.connect();
   }

@@ -32,7 +32,12 @@ async function startTestServer(env = {}) {
   const inherited = { ...process.env };
   delete inherited.DATABASE_URL;
 
-  const child = fork(path.join(__dirname, 'fixtures', 'server-entry.js'), [], {
+  // A test can ask for the fixture whose account service it can control.
+  const entry = env.AUTH_FIXTURE
+    ? path.join(__dirname, 'fixtures', 'auth-server-entry.js')
+    : path.join(__dirname, 'fixtures', 'server-entry.js');
+
+  const child = fork(entry, [], {
     cwd: ROOT,
     env: {
       ...inherited,
@@ -82,6 +87,36 @@ async function startTestServer(env = {}) {
     url,
     port,
     logs,
+    /** Sends a control message to the fixture and waits for its acknowledgement. */
+    control(message, ackType, timeoutMs = 10000) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.off('message', onMessage);
+          reject(new Error(`fixture did not acknowledge "${ackType}"`));
+        }, timeoutMs);
+        function onMessage(msg) {
+          if (msg && msg.type === ackType) {
+            clearTimeout(timer);
+            child.off('message', onMessage);
+            resolve(msg);
+          }
+        }
+        child.on('message', onMessage);
+        if (message) child.send(message);
+      });
+    },
+    /** Resolves with the first fixture message of this type. */
+    nextMessage(type, timeoutMs = 10000) {
+      return this.control(null, type, timeoutMs);
+    },
+    /** Collects fixture messages of a type as they arrive. */
+    collect(type) {
+      const seen = [];
+      child.on('message', (msg) => {
+        if (msg && msg.type === type) seen.push(msg);
+      });
+      return seen;
+    },
     isAlive: () => !exited,
     exitInfo: () => exitInfo,
     async stop() {

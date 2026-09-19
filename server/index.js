@@ -414,15 +414,30 @@ function onSocketEvent(socket, event, handler) {
     const fail = (err) => {
       console.error(`socket "${event}" failed for ${socket.id}:`, err && err.message);
     };
-    let result;
-    try {
-      result = handler(asPayload(raw));
-    } catch (err) {
-      fail(err);
+    const payload = asPayload(raw);
+    const run = () => {
+      let result;
+      try {
+        result = handler(payload);
+      } catch (err) {
+        fail(err);
+        return;
+      }
+      // An async handler rejects long after the try/catch has returned.
+      if (result && typeof result.then === 'function') result.then(undefined, fail);
+    };
+
+    // A recovered connection arrives carrying the identity it had before it
+    // dropped, and that identity has to be re-checked. Until the check finishes,
+    // nothing this connection asks for may run: starting the check and letting
+    // the socket carry on meant a revoked account could queue, host and be
+    // matched under its old name in the milliseconds before the answer came
+    // back — and the check is a database round trip, so that window is real.
+    if (socket.data.authPending) {
+      socket.data.authPending.then(run, run);
       return;
     }
-    // An async handler rejects long after the try/catch has returned.
-    if (result && typeof result.then === 'function') result.then(undefined, fail);
+    run();
   });
 }
 
@@ -612,8 +627,14 @@ function createRoom(socketA, socketB) {
     // room and gets a new one. It is what makes saving the result idempotent.
     gameId: randomUUID(),
     players: [
-      { socketId: socketA.id, name: nameFor(socketA), accountId: accountIdOf(socketA) },
-      { socketId: socketB.id, name: nameFor(socketB), accountId: accountIdOf(socketB) },
+      // The seat records WHICH session it was taken with, not just which
+      // account. Revocation has to reach a player whose connection is gone —
+      // they have twelve seconds of recovery grace, and the match can finish
+      // inside it — and a disconnected socket is not in io's socket list to be
+      // found. A token-scoped sign-out must also not touch the same account's
+      // other, still-valid sessions.
+      { socketId: socketA.id, name: nameFor(socketA), accountId: accountIdOf(socketA), sessionToken: socketA.data.sessionToken || null },
+      { socketId: socketB.id, name: nameFor(socketB), accountId: accountIdOf(socketB), sessionToken: socketB.data.sessionToken || null },
     ],
     round: 0,
     scores: { [socketA.id]: 0, [socketB.id]: 0 },
@@ -995,23 +1016,38 @@ async function sendStatsUpdate(room) {
  * is not recorded against someone who is no longer signed in.
  */
 function revokeAccountSockets({ playerId = null, token = null } = {}) {
-  let revoked = 0;
+  const wanted = (seatOrData) => {
+    if (token && seatOrData.sessionToken === String(token)) return true;
+    return Boolean(playerId) && seatOrData.accountId === playerId;
+  };
+
+  let sockets = 0;
   for (const socket of io.of('/').sockets.values()) {
-    const matchesToken = token && socket.data.sessionToken === String(token);
-    const matchesPlayer = playerId && socket.data.account && socket.data.account.id === playerId;
-    if (!matchesToken && !matchesPlayer) continue;
+    if (!wanted({
+      sessionToken: socket.data.sessionToken,
+      accountId: socket.data.account ? socket.data.account.id : null,
+    })) continue;
 
     socket.data.account = null;
     socket.data.sessionToken = null;
-    const room = rooms.get(socket.data.roomId);
-    if (room) {
-      const seat = room.players.find((pl) => pl.socketId === socket.id);
-      if (seat) seat.accountId = null;
-    }
     socket.emit('sessionEnded');
-    revoked += 1;
+    sockets += 1;
   }
-  return revoked;
+
+  // Seats are cleared separately, by walking the rooms. A player whose
+  // transport has dropped is not in the socket list above, but their seat is
+  // still in a live room and the game can finish without them — which used to
+  // record the result against the account they had just signed out of.
+  let seats = 0;
+  for (const room of rooms.values()) {
+    for (const seat of room.players) {
+      if (!seat.accountId || !wanted(seat)) continue;
+      seat.accountId = null;
+      seat.sessionToken = null;
+      seats += 1;
+    }
+  }
+  return { sockets, seats };
 }
 
 io.on('connection', (socket) => {
@@ -1038,21 +1074,43 @@ io.on('connection', (socket) => {
   // is re-checked against the database rather than trusted.
   if (socket.recovered && socket.data.sessionToken) {
     const token = socket.data.sessionToken;
-    accounts.playerForToken(token).then((player) => {
-      if (socket.data.sessionToken !== token) return; // changed while we asked
-      if (player) {
-        socket.data.account = player;
-        return;
-      }
+
+    const drop = () => {
       socket.data.account = null;
       socket.data.sessionToken = null;
       const room = rooms.get(socket.data.roomId);
       if (room) {
         const seat = room.players.find((pl) => pl.socketId === socket.id);
-        if (seat) seat.accountId = null;
+        if (seat) {
+          seat.accountId = null;
+          seat.sessionToken = null;
+        }
       }
       socket.emit('sessionEnded');
-    }, (err) => console.error('session re-check failed:', err.message));
+    };
+
+    // Held as a barrier rather than started and forgotten: onSocketEvent waits
+    // on it, so nothing runs under an identity that has not been confirmed.
+    socket.data.authPending = accounts.playerForToken(token)
+      .then((player) => {
+        // A sign-out or deletion that landed while the question was in flight
+        // has already cleared this; a late answer must not bring it back.
+        if (socket.data.sessionToken !== token) return;
+        if (player) {
+          socket.data.account = player;
+          return;
+        }
+        drop();
+      })
+      .catch((err) => {
+        // Fail closed. Keeping the old identity because the lookup broke is how
+        // a revoked account goes on playing as itself.
+        console.error('session re-check failed, dropping identity:', err && err.message);
+        if (socket.data.sessionToken === token) drop();
+      })
+      .finally(() => {
+        socket.data.authPending = null;
+      });
   }
 
   if (socket.recovered && socket.data.roomId) {

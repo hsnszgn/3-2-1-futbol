@@ -171,14 +171,17 @@ module.exports = async function run({ databaseUrl }) {
       assert.ok(a.token && b.token);
 
       const uid = 'ayni-oyun-kimligi';
-      const first = await accounts.recordMatch({
+      const save = () => accounts.recordMatch({
         matchUid: uid, playerAId: idA, playerBId: idB, scoreA: 9, scoreB: 3, winnerId: idA,
       });
-      const second = await accounts.recordMatch({
-        matchUid: uid, playerAId: idA, playerBId: idB, scoreA: 9, scoreB: 3, winnerId: idA,
-      });
-      assert.strictEqual(first, true, 'the first save should write the row');
-      assert.strictEqual(second, false, 'the second save should write nothing');
+
+      // Fired together, not one after the other. Sequential calls only show that
+      // the second sees the first's row; they say nothing about two saves racing
+      // each other, which is the case the unique index actually has to settle.
+      // The pool gives each call its own connection.
+      const outcomes = await Promise.all([save(), save(), save(), save()]);
+      assert.strictEqual(outcomes.filter(Boolean).length, 1,
+        `${outcomes.filter(Boolean).length} of 4 concurrent saves claimed to write the row`);
 
       const { rows: saved } = await db.query('SELECT COUNT(*)::int AS n FROM matches WHERE match_uid = $1', [uid]);
       assert.strictEqual(saved[0].n, 1, `${saved[0].n} rows for one game`);
@@ -189,7 +192,7 @@ module.exports = async function run({ databaseUrl }) {
       });
       assert.strictEqual(selfMatch, false, 'recordMatch accepted one player on both sides');
 
-      notes.push('aynı oyun kimliğiyle iki kayıt denemesi -> 1 satır; kendine karşı kayıt reddedildi');
+      notes.push('aynı kimlikle 4 EŞZAMANLI kayıt denemesi -> 1 satır, 1 çağrı yazdığını söylüyor; kendine karşı kayıt reddedildi');
     }
 
     // --- 5. a real game is recorded exactly once, a rematch separately ------
@@ -360,10 +363,14 @@ module.exports = async function run({ databaseUrl }) {
 
       const [first, second] = await Promise.all([deleteOnce(), deleteOnce()]);
       const statuses = [first, second].sort();
-      assert.ok(statuses.includes(200),
+      // Spelled out exactly. "At least one 200 and not both 200" also accepts a
+      // 500, which would mean the second request crashed rather than finding
+      // nothing to do — a pass for the wrong reason. The second may be 404 (the
+      // account is already gone) or 401 (its session was deleted first).
+      assert.strictEqual(statuses[0], 200,
         `neither concurrent delete succeeded (${statuses.join(', ')})`);
-      assert.ok(!statuses.every((code) => code === 200),
-        'both concurrent deletes reported success; the second should find nothing to do');
+      assert.ok([401, 404].includes(statuses[1]),
+        `the second concurrent delete answered ${statuses[1]}, expected 404 or 401`);
 
       const { rows } = await db.query(
         'SELECT username, display_name, password_hash, deleted_at FROM players WHERE id = $1',
@@ -390,6 +397,114 @@ module.exports = async function run({ databaseUrl }) {
         `the tombstone username was registerable (${taken.status})`);
 
       notes.push(`eşzamanlı iki silme: ${statuses.join('/')}; mezar taşı "deleted:${victimId}" (kayıt edilemez), oturumlar silindi, "${squatter}" etkilenmedi`);
+    }
+
+    // --- 8b. the deletion really rolls back ----------------------------------
+    // The concurrency test above shows the outcome, not the atomicity: nothing
+    // in it forces a failure BETWEEN the two statements. A trigger makes the
+    // UPDATE fail, and then neither the sessions nor the account may have
+    // changed — a half-done deletion signs a player out without deleting them.
+    {
+      const victim = await registerAccount(server, 'geri_alma');
+      const { rows: vr } = await db.query("SELECT id FROM players WHERE username = 'geri_alma'");
+      const victimId = vr[0].id;
+      const before = await db.query('SELECT COUNT(*)::int AS n FROM sessions WHERE player_id = $1', [victimId]);
+      assert.ok(before.rows[0].n > 0, 'the account should have a session to lose');
+
+      await db.query(`
+        CREATE OR REPLACE FUNCTION test_block_delete() RETURNS trigger AS $$
+        BEGIN RAISE EXCEPTION 'controlled failure inside the deletion'; END;
+        $$ LANGUAGE plpgsql;
+      `);
+      await db.query(`
+        CREATE TRIGGER test_block_delete_trg BEFORE UPDATE ON players
+        FOR EACH ROW WHEN (NEW.deleted_at IS NOT NULL) EXECUTE FUNCTION test_block_delete();
+      `);
+
+      let failed = null;
+      try {
+        const res = await fetch(`${server.url}/api/account/delete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${victim.token}` },
+          body: JSON.stringify({ password: 'sifre123' }),
+        });
+        failed = res.status;
+      } finally {
+        await db.query('DROP TRIGGER IF EXISTS test_block_delete_trg ON players');
+        await db.query('DROP FUNCTION IF EXISTS test_block_delete()');
+      }
+
+      assert.strictEqual(failed, 500, `a failing deletion answered ${failed}, expected 500`);
+
+      const after = await db.query(
+        'SELECT username, deleted_at, password_hash FROM players WHERE id = $1', [victimId],
+      );
+      assert.strictEqual(after.rows[0].username, 'geri_alma', 'the username was changed despite the failure');
+      assert.strictEqual(after.rows[0].deleted_at, null, 'the account was marked deleted despite the failure');
+      assert.notStrictEqual(after.rows[0].password_hash, '', 'the password hash was cleared despite the failure');
+
+      const sessions = await db.query('SELECT COUNT(*)::int AS n FROM sessions WHERE player_id = $1', [victimId]);
+      assert.strictEqual(sessions.rows[0].n, before.rows[0].n,
+        'the sessions were deleted even though the deletion failed — the rollback did not happen');
+
+      // And the account still works.
+      const me = await fetch(`${server.url}/api/me`, {
+        headers: { Authorization: `Bearer ${victim.token}` },
+      });
+      assert.strictEqual(me.status, 200, `the account was left unusable (${me.status})`);
+
+      notes.push('silme ortasında zorlanmış hata: hesap ve oturumlar değişmedi (rollback), hesap hâlâ çalışıyor');
+    }
+
+    // --- 8c. the NOT VALID constraint survives a legacy row ------------------
+    // The constraint is added NOT VALID precisely so a deployment whose history
+    // contains a same-account row still migrates. That claim needs the situation
+    // it describes: an old row that breaks the rule, put in with the constraint
+    // dropped, and then the migration run again.
+    {
+      const legacy = await registerAccount(server, 'eski_satir');
+      const { rows: lr } = await db.query("SELECT id FROM players WHERE username = 'eski_satir'");
+      const legacyId = lr[0].id;
+
+      await db.query('ALTER TABLE matches DROP CONSTRAINT IF EXISTS matches_distinct_players');
+      await db.query(
+        `INSERT INTO matches (player_a, player_b, score_a, score_b, winner_id, match_uid)
+         VALUES ($1, $1, 5, 5, $1, 'tarihsel-bozuk-satir')`,
+        [legacyId],
+      );
+
+      // Re-running the migration must succeed despite that row.
+      const migrated = await accountsDb.migrate();
+      assert.strictEqual(migrated, true, 'the migration failed on a schema with a legacy bad row');
+
+      const { rows: has } = await db.query(
+        "SELECT convalidated FROM pg_constraint WHERE conname = 'matches_distinct_players'",
+      );
+      assert.ok(has[0], 'the constraint was not re-created');
+      assert.strictEqual(has[0].convalidated, false, 'the constraint should be NOT VALID');
+
+      // The old row is still there — untouched, as intended.
+      const { rows: old } = await db.query(
+        "SELECT COUNT(*)::int AS n FROM matches WHERE match_uid = 'tarihsel-bozuk-satir'",
+      );
+      assert.strictEqual(old[0].n, 1, 'the legacy row was removed by the migration');
+
+      // But a NEW row breaking the same rule is refused.
+      let refused = null;
+      try {
+        await db.query(
+          `INSERT INTO matches (player_a, player_b, score_a, score_b, winner_id, match_uid)
+           VALUES ($1, $1, 1, 1, $1, 'yeni-bozuk-satir')`,
+          [legacyId],
+        );
+      } catch (err) {
+        refused = err.constraint;
+      }
+      assert.strictEqual(refused, 'matches_distinct_players',
+        `a new same-account row was not refused (${refused})`);
+
+      await db.query("DELETE FROM matches WHERE match_uid = 'tarihsel-bozuk-satir'");
+      notes.push('tarihsel bozuk satır varken migration geçti (kısıt NOT VALID kaldı), eski satır korundu, yeni bozuk satır reddedildi');
     }
 
     // --- 9. a route that throws answers, rather than hanging -----------------
