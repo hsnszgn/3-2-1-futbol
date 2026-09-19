@@ -17,6 +17,23 @@ const { startTestServer, connectClient, waitFor, waitForAll, submit } = require(
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Waits for a count to be reached instead of sleeping a guessed amount.
+ *
+ * A fixed sleep turns "the server answered all of them" into "the server
+ * answered all of them within 600ms on an unloaded machine" — and that started
+ * failing when an earlier test left work in the event loop. The assertion is the
+ * same; only the waiting is no longer a guess.
+ */
+async function waitForCount(read, expected, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (read() >= expected) return;
+    await sleep(50);
+  }
+  throw new Error(`${label}: ${read()} of ${expected} within ${timeoutMs}ms`);
+}
+
 // Small, malformed payloads. Nothing here is near the size limit, so every one
 // of them must reach a handler.
 const HOSTILE = [
@@ -92,7 +109,7 @@ module.exports = async function run() {
 
       // Sent exactly as they are — no client-side normalisation.
       for (const payload of HOSTILE) socket.emit(event, payload);
-      await sleep(600);
+      await waitForCount(() => replies, HOSTILE.length, 15000, `"${event}" replies`);
 
       assert.ok(!dropped, `connection was closed by hostile "${event}" payloads`);
       assert.strictEqual(replies, HOSTILE.length,
@@ -195,7 +212,7 @@ module.exports = async function run() {
 
       // Sweep 1: unstamped. Every one must be refused as belonging to no round.
       for (const payload of HOSTILE) a.emit('submitTeam', payload);
-      await sleep(400);
+      await waitForCount(() => rejections.length, HOSTILE.length, 15000, 'unstamped submitTeam refusals');
       assert.strictEqual(rejections.length, HOSTILE.length,
         `unstamped submitTeam: ${rejections.length} of ${HOSTILE.length} refused`);
       assert.ok(rejections.every((r) => r === 'stale_round'),
@@ -242,7 +259,7 @@ module.exports = async function run() {
 
       // Unstamped answers are refused as belonging to no round.
       for (const payload of HOSTILE) a.emit('submitGuess', payload);
-      await sleep(400);
+      await waitForCount(() => guessRefusals.length, HOSTILE.length, 15000, 'unstamped submitGuess refusals');
       assert.strictEqual(guessRefusals.length, HOSTILE.length,
         `unstamped submitGuess: ${guessRefusals.length} of ${HOSTILE.length} refused`);
       assert.ok(guessRefusals.every((r) => r === 'stale_round'),
@@ -307,7 +324,7 @@ module.exports = async function run() {
         let waitingReplies = 0;
         a.on('rematchWaiting', () => { waitingReplies += 1; });
         for (const payload of HOSTILE) a.emit('requestRematch', payload);
-        await sleep(600);
+        await waitForCount(() => waitingReplies, HOSTILE.length, 15000, 'game-over rematch replies');
 
         assert.ok(shortGame.isAlive(), 'hostile requestRematch killed the server');
         assert.ok(a.connected && b.connected, 'hostile requestRematch dropped a connection');

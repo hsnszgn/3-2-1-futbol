@@ -55,6 +55,12 @@ module.exports = async function run({ databaseUrl }) {
   process.env.DATABASE_URL = databaseUrl;
   // eslint-disable-next-line global-require
   const accounts = require('../server/accounts');
+  // Requiring it opens a connection pool in THIS process. Left open, it keeps
+  // handles and work in the event loop for every test that runs after this one —
+  // which is how a later test with tight timing started failing only when a
+  // database was present.
+  // eslint-disable-next-line global-require
+  const accountsDb = require('../server/db');
 
   const notes = [];
   const server = await startTestServer({ DATABASE_URL: databaseUrl, MAX_ROUNDS: '1' });
@@ -424,6 +430,7 @@ module.exports = async function run({ databaseUrl }) {
     return notes.join(' · ');
   } finally {
     await db.end().catch(() => {});
+    await accountsDb.close().catch(() => {});
     await server.stop();
   }
 };
