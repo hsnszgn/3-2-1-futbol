@@ -415,10 +415,19 @@ function onSocketEvent(socket, event, handler) {
       console.error(`socket "${event}" failed for ${socket.id}:`, err && err.message);
     };
     const payload = asPayload(raw);
+    // When this message ARRIVED, taken here and nowhere else.
+    //
+    // Reading the clock inside a handler looks equivalent and is not: anything
+    // the handler waits for first — the Wikidata lookup once, the identity check
+    // below now — moves the reading from "when the answer arrived" to "when we
+    // got round to it". Both mistakes cost a player points for a delay that was
+    // not theirs. The arrival time is server-measured metadata; the client is
+    // never asked what time it thinks it is.
+    const receivedAt = Date.now();
     const run = () => {
       let result;
       try {
-        result = handler(payload);
+        result = handler(payload, { receivedAt });
       } catch (err) {
         fail(err);
         return;
@@ -553,6 +562,18 @@ function newJoinAttempt(socket) {
 const joinAttemptIsCurrent = (socket, attempt) => socket.data.joinAttempt === attempt;
 
 /** Still connected, and not already sitting in a live room. */
+/**
+ * Is this connection's identity settled?
+ *
+ * The barrier in onSocketEvent only holds back what the connection ITSELF asks
+ * for. A room has two sides, and the other player's request runs on their
+ * timetable: a guest accepting an invite could build a room with a host who had
+ * reconnected but whose account had not been re-checked yet — so the guest was
+ * matched against a name that had already been signed out. Every path that seats
+ * a player has to ask about both of them, not just the one that spoke.
+ */
+const authIsSettled = (socket) => Boolean(socket) && !socket.data.authPending;
+
 function isAvailableForMatch(socket) {
   if (!socket || !socket.connected) return false;
   return !(socket.data.roomId && rooms.has(socket.data.roomId));
@@ -610,6 +631,9 @@ function createRoom(socketA, socketB) {
     console.error('refusing to match an account against itself:', accountIdOf(socketA));
     return false;
   }
+  // The last line of defence: no seat is created for an identity that is still
+  // being verified, no matter which side asked for the room.
+  if (!authIsSettled(socketA) || !authIsSettled(socketB)) return false;
 
   // Commit both players before anything can await, and retire any join
   // attempt either of them still has in flight.
@@ -965,6 +989,16 @@ function endGame(room) {
 // the result, and a half-recorded game would distort both leaderboards.
 async function saveMatch(room, { scoreA, scoreB, winnerSocketId }) {
   const [a, b] = room.players;
+
+  // Recording is reached by a timer, not by a socket event, so it never passes
+  // the barrier in onSocketEvent. If either seat's identity is still being
+  // re-checked, wait: the answer may be that the account was signed out, and a
+  // result written a moment earlier would belong to nobody.
+  await Promise.all(room.players.map((seat) => {
+    const socket = io.of('/').sockets.get(seat.socketId);
+    return socket && socket.data.authPending ? socket.data.authPending : null;
+  }));
+
   if (!db.isEnabled() || !a.accountId || !b.accountId) return;
   const winnerId = winnerSocketId === a.socketId ? a.accountId
     : winnerSocketId === b.socketId ? b.accountId
@@ -1172,6 +1206,12 @@ io.on('connection', (socket) => {
         setAside.push(opponent);
         continue;
       }
+      // Waiting on their own identity check — they keep their place rather than
+      // being thrown out of the queue for it.
+      if (!authIsSettled(opponent)) {
+        setAside.push(opponent);
+        continue;
+      }
       if (createRoom(opponent, socket)) {
         paired = true;
         break;
@@ -1243,32 +1283,50 @@ io.on('connection', (socket) => {
     // way back. Give them a moment before writing the invite off.
     const hostSocket = await waitForConnectedSocket(entry.hostSocketId, HOST_WAIT_MS);
 
-    // That wait can be seconds long, so everything is re-checked against the
-    // state as it is now. The version check comes FIRST and returns silently:
-    // if this attempt has been superseded — by a duplicate request, by the
-    // player queueing or leaving, or by the match this very player is already
-    // in — it must not speak at all. Reporting a failure here would eject a
-    // player from a game that succeeded.
-    if (!joinAttemptIsCurrent(socket, attempt)) return;
-    if (!isAvailableForMatch(socket)) return; // joiner already got a game
-    if (codeRooms.get(normalizedCode) !== entry) {
-      socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
-      return;
-    }
-    if (!hostSocket) {
-      codeRooms.delete(normalizedCode);
-      socket.emit('errorMessage', { message: 'Oda sahibi çevrimdışı, yeni bir kod isteyin.' });
-      return;
-    }
-    if (!isAvailableForMatch(hostSocket)) {
-      socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
-      return;
-    }
-    // Joining your own invite from a second tab while signed into the same
-    // account is the same problem as matching yourself in the queue.
-    if (sameAccount(hostSocket, socket)) {
-      socket.emit('errorMessage', { message: 'Bu hesap zaten bu odada — kendinle oynayamazsın.' });
-      return;
+    /**
+     * Everything that has to hold at the moment the room is built.
+     *
+     * Each wait below can be seconds long, so this runs again after every one of
+     * them rather than once at the end. The version check comes FIRST and
+     * returns silently: if this attempt has been superseded — by a duplicate
+     * request, by the player queueing or leaving, or by the match this very
+     * player is already in — it must not speak at all. Reporting a failure here
+     * would eject a player from a game that succeeded.
+     */
+    const stillValid = () => {
+      if (!joinAttemptIsCurrent(socket, attempt)) return false;
+      if (!isAvailableForMatch(socket)) return false; // joiner already got a game
+      if (codeRooms.get(normalizedCode) !== entry) {
+        socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
+        return false;
+      }
+      if (!hostSocket) {
+        codeRooms.delete(normalizedCode);
+        socket.emit('errorMessage', { message: 'Oda sahibi çevrimdışı, yeni bir kod isteyin.' });
+        return false;
+      }
+      if (!isAvailableForMatch(hostSocket)) {
+        socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
+        return false;
+      }
+      // Joining your own invite from a second tab while signed into the same
+      // account is the same problem as matching yourself in the queue.
+      if (sameAccount(hostSocket, socket)) {
+        socket.emit('errorMessage', { message: 'Bu hesap zaten bu odada — kendinle oynayamazsın.' });
+        return false;
+      }
+      return true;
+    };
+
+    if (!stillValid()) return;
+
+    // The host may have come back from a drop and still be having their identity
+    // re-checked. Waiting for it here is what stops this guest from being matched
+    // against a name that has already been signed out — the barrier in
+    // onSocketEvent only covers what the host's OWN connection asks for.
+    if (hostSocket.data.authPending) {
+      await hostSocket.data.authPending;
+      if (!stillValid()) return;
     }
 
     codeRooms.delete(normalizedCode);
@@ -1341,12 +1399,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  onSocketEvent(socket, 'submitGuess', async ({ guess, attempt } = {}) => {
-    // Everything that decides WHEN this answer arrived is read before any
-    // await. Reading the clock after the Wikidata lookup made the score depend
-    // on how slow Wikidata happened to be: the same answer, typed at the same
-    // moment, was worth +3 on a fast day and +1 on a slow one.
-    const receivedAt = Date.now();
+  onSocketEvent(socket, 'submitGuess', async ({ guess, attempt } = {}, { receivedAt } = {}) => {
+    // The arrival time comes from onSocketEvent, measured before this handler
+    // was allowed to start. Reading the clock here instead made the score
+    // depend on how long the server had spent waiting — first on the Wikidata
+    // lookup, then on the identity re-check — so the same answer, typed at the
+    // same moment, was worth +3 or +2 depending on something the player has no
+    // part in. It is also what the early/late checks below are measured against,
+    // so an answer held back by a wait cannot arrive "after" the window opened.
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
     // Same protocol rule as submitTeam, and checked first for the same reason:

@@ -202,5 +202,147 @@ module.exports = async function run() {
     }
   }
 
+  // --- 4. the OTHER player cannot build a room with an unverified host ------
+  // The barrier only holds back what a connection asks for itself. A guest
+  // accepting an invite runs on their own timetable, and used to be matched
+  // against a host who had reconnected but whose account had not been re-checked
+  // — so the guest played against a name that was already signed out.
+  {
+    const server = await startAuthServer({ AUTH_LOOKUP_DELAY_MS: '2500' });
+    try {
+      const host = await connectClient(server.url, { token: 'token-ada' });
+      const guest = await connectClient(server.url);
+
+      const created = waitFor(host, 'privateRoomCreated', 8000);
+      host.emit('createPrivateRoom', { name: 'Misafir Host' });
+      const { code } = await created;
+
+      const originalId = host.id;
+      const down = waitFor(host, 'disconnect', 5000);
+      host.io.engine.close();
+      await down;
+      await sleep(150);
+      await logout(server, 'token-ada');
+
+      await server.control({ type: 'setLookupMode', mode: 'delay' }, 'modeSet');
+      const lookupStarted = server.nextMessage('lookupPending', 10000);
+      const up = waitFor(host, 'connect', 8000);
+      host.connect();
+      await up;
+      await lookupStarted;
+      assert.strictEqual(host.id, originalId, 'the host should have recovered');
+      assert.strictEqual(host.recovered, true, 'the host did not recover');
+
+      // The invite is accepted while the host's identity is still in question.
+      const matched = waitFor(guest, 'matched', 15000);
+      guest.emit('joinPrivateRoom', { name: 'Misafir', code });
+      const match = await matched;
+
+      assert.notStrictEqual(match.opponentName, 'Ada',
+        'the guest was matched against the revoked account name');
+      assert.strictEqual(match.opponentName, 'Misafir Host',
+        `the host should appear as a guest, got "${match.opponentName}"`);
+
+      notes.push(`davet yolu: host doğrulanmadan oda kurulmuyor, rakip adı "${match.opponentName}" (iptal edilen hesap adı değil)`);
+      host.close();
+      guest.close();
+    } finally {
+      await server.stop();
+    }
+  }
+
+  // --- 5. the identity check must not cost the player points ----------------
+  // The same answer, at the same moment, against a fast and a very slow identity
+  // check. Reading the clock inside the handler put the waiting time into the
+  // score — the same mistake the Wikidata lookup caused once, at a new wait.
+  {
+    const measured = [];
+    for (const delay of [50, 6000]) {
+      const server = await startAuthServer({ AUTH_LOOKUP_DELAY_MS: String(delay) });
+      try {
+        const { a, b } = await pair(server);
+        const opened = waitForAll([a, b], 'openGuess', 12000);
+        submit(a, 'submitTeam', { team: 'Chelsea' });
+        submit(b, 'submitTeam', { team: 'Liverpool' });
+        await opened;
+
+        const originalId = await goOffline(a, b);
+        await server.control({ type: 'setLookupMode', mode: 'delay' }, 'modeSet');
+        const lookupStarted = server.nextMessage('lookupPending', 10000);
+        const up = waitFor(a, 'connect', 8000);
+        a.connect();
+        await up;
+        await lookupStarted;
+        assert.strictEqual(a.id, originalId, 'the player should have recovered');
+
+        // Answered immediately on return, while the check is still running.
+        const result = waitFor(b, 'roundResult', 20000);
+        submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
+        const round = await result;
+        measured.push({ delay, points: round.points, elapsedMs: round.elapsedMs });
+
+        a.close();
+        b.close();
+      } finally {
+        await server.stop();
+      }
+    }
+
+    const [fast, slow] = measured;
+    assert.strictEqual(fast.points, 3, `a quick answer should score +3, got +${fast.points}`);
+    assert.strictEqual(slow.points, fast.points,
+      `a ${slow.delay}ms identity check changed the score: +${fast.points} -> +${slow.points}`);
+    assert.ok(slow.elapsedMs < 1000,
+      `the identity check leaked into the elapsed time (${slow.elapsedMs}ms)`);
+
+    notes.push(`kimlik doğrulama gecikmesi puanı etkilemiyor: ${fast.delay}ms -> +${fast.points} (${fast.elapsedMs}ms), `
+      + `${slow.delay}ms -> +${slow.points} (${slow.elapsedMs}ms)`);
+  }
+
+  // --- 6. an answer held by the barrier is still judged by when it arrived ---
+  // Sent before the window opened, processed after it. Measured by arrival it is
+  // early and refused; measured by when the server got round to it, it was a
+  // free top-tier score.
+  {
+    const server = await startAuthServer({ AUTH_LOOKUP_DELAY_MS: '2200' });
+    try {
+      const { a, b } = await pair(server);
+      const revealed = waitForAll([a, b], 'teamsRevealed', 12000);
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
+      const [reveal] = await revealed;
+
+      const originalId = await goOffline(a, b);
+      await server.control({ type: 'setLookupMode', mode: 'delay' }, 'modeSet');
+      const lookupStarted = server.nextMessage('lookupPending', 10000);
+      const up = waitFor(a, 'connect', 8000);
+      a.connect();
+      await up;
+      await lookupStarted;
+      assert.strictEqual(a.id, originalId, 'the player should have recovered');
+
+      const results = [];
+      a.on('roundResult', (r) => results.push(r.points));
+      const tooEarly = waitFor(a, 'guessTooEarly', 15000);
+
+      // Still inside the reveal — the window has not opened yet.
+      assert.ok(Date.now() < reveal.opensAt,
+        'the test needs to answer before the window opens');
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
+
+      const payload = await tooEarly;
+      assert.ok(payload.opensInMs > 0, 'the refusal should say how long is left');
+      await sleep(1500);
+      assert.deepStrictEqual(results, [],
+        `an answer sent before the window opened scored anyway (+${results.join(', +')})`);
+
+      notes.push(`bariyerde bekletilen erken cevap varış zamanına göre reddedildi (${payload.opensInMs}ms kalmıştı)`);
+      a.close();
+      b.close();
+    } finally {
+      await server.stop();
+    }
+  }
+
   return notes.join(' · ');
 };
