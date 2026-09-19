@@ -982,12 +982,20 @@ function endGame(room) {
     winnerSocketId,
   });
 
-  saveMatch(room, { scoreA, scoreB, winnerSocketId });
+  // The id of the game that just ended, read HERE and passed on.
+  //
+  // saveMatch may wait (for an identity re-check), and a rematch can start while
+  // it waits — which sets room.gameId to the NEW game's id. Reading it inside
+  // saveMatch therefore stamped the finished game with the next game's id, and
+  // when the rematch was saved it collided: same id, so ON CONFLICT DO NOTHING
+  // threw the second result away. Scores and winner were already frozen here for
+  // exactly this reason; the id belongs with them.
+  saveMatch(room, { scoreA, scoreB, winnerSocketId, gameId: room.gameId });
 }
 
 // Only games between two signed-in players count: a guest has nowhere to put
 // the result, and a half-recorded game would distort both leaderboards.
-async function saveMatch(room, { scoreA, scoreB, winnerSocketId }) {
+async function saveMatch(room, { scoreA, scoreB, winnerSocketId, gameId }) {
   const [a, b] = room.players;
 
   // Recording is reached by a timer, not by a socket event, so it never passes
@@ -999,13 +1007,17 @@ async function saveMatch(room, { scoreA, scoreB, winnerSocketId }) {
     return socket && socket.data.authPending ? socket.data.authPending : null;
   }));
 
+  // The account ids, by contrast, are read AFTER the wait on purpose: the whole
+  // point of waiting is that the answer may be "this player is signed out", and
+  // then their seat has been cleared and nothing is recorded.
   if (!db.isEnabled() || !a.accountId || !b.accountId) return;
   const winnerId = winnerSocketId === a.socketId ? a.accountId
     : winnerSocketId === b.socketId ? b.accountId
     : null;
   try {
     await accounts.recordMatch({
-      matchUid: room.gameId,
+      // The id frozen when this game ended, not whatever the room is on now.
+      matchUid: gameId,
       playerAId: a.accountId,
       playerBId: b.accountId,
       scoreA,

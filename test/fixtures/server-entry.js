@@ -110,4 +110,28 @@ http.Server.prototype.listen = function patchedListen(...args) {
   return realListen.apply(this, args);
 };
 
+// An optional slow identity lookup, with everything else — including the real
+// database — untouched. The auth fixture next door replaces the whole account
+// service and cannot write rows; this knob exists so a DATABASE-backed test can
+// still make the one wait that happens before a finished game's id is read.
+if (process.env.AUTH_LOOKUP_DELAY_MS) {
+  const accounts = require('../../server/accounts');
+  const realPlayerForToken = accounts.playerForToken;
+  const delay = Number(process.env.AUTH_LOOKUP_DELAY_MS);
+  let armed = false;
+  accounts.playerForToken = async (token) => {
+    if (armed) {
+      if (process.send) process.send({ type: 'lookupPending', token: String(token) });
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    return realPlayerForToken(token);
+  };
+  process.on('message', (msg) => {
+    if (msg && msg.type === 'setLookupMode') {
+      armed = msg.mode !== 'normal';
+      if (process.send) process.send({ type: 'modeSet', mode: msg.mode });
+    }
+  });
+}
+
 require('../../server/index.js');

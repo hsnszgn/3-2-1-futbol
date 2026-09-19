@@ -250,6 +250,114 @@ module.exports = async function run({ databaseUrl }) {
       y.close();
     }
 
+    // --- 5b. a rematch during a delayed save writes its own row --------------
+    // The same race as test/session-revocation.test.js proves at the recording
+    // boundary, carried through to actual rows.
+    //
+    // It has to be the IDENTITY check that is slow. An earlier version of this
+    // held a lock on the matches table instead, which was measured and does not
+    // work: the lock delays the INSERT, and by then the game's id has already
+    // been read as an argument. The only wait that happens BEFORE that read is
+    // the identity re-check, so that is the one to slow down — with the real
+    // database still behind it.
+    {
+      const slow = await startTestServer({
+        DATABASE_URL: databaseUrl,
+        MAX_ROUNDS: '1',
+        NEXT_ROUND_DELAY_MS: '200',
+        AUTH_LOOKUP_DELAY_MS: '3500',
+      });
+      try {
+        const a = await registerAccount(slow, 'yaris_bir');
+        const b = await registerAccount(slow, 'yaris_iki');
+        const [x, y] = await Promise.all([
+          connectClient(slow.url, { token: a.token }),
+          connectClient(slow.url, { token: b.token }),
+        ]);
+        const matched = Promise.all([waitFor(x, 'matched', 8000), waitFor(y, 'matched', 8000)]);
+        x.emit('joinQueue', { name: 'Ali' });
+        y.emit('joinQueue', { name: 'Veli' });
+        await matched;
+
+        const playRound = async (winner) => {
+          await waitForAll([x, y], 'openTeamSubmit', 20000);
+          const ok = Promise.all([waitFor(x, 'teamAccepted', 10000), waitFor(y, 'teamAccepted', 10000)]);
+          submit(x, 'submitTeam', { team: 'Chelsea' });
+          submit(y, 'submitTeam', { team: 'Liverpool' });
+          await ok;
+          await waitForAll([x, y], 'openGuess', 20000);
+          const over = Promise.all([waitFor(x, 'gameOver', 25000), waitFor(y, 'gameOver', 25000)]);
+          submit(winner, 'submitGuess', { guess: 'Mohamed Salah' });
+          await over;
+        };
+
+        // The drop has to land so that the identity check is STILL RUNNING when
+        // the first game ends — otherwise saveMatch never waits and the race is
+        // not reached at all. (Measured: dropping before the team window lets the
+        // lookup finish first, and the test then passes even against the bug.)
+        // So: play up to the guess window, drop there, come back with a slow
+        // lookup, and finish the game immediately.
+        await waitForAll([x, y], 'openTeamSubmit', 20000);
+        const accepted = Promise.all([waitFor(x, 'teamAccepted', 10000), waitFor(y, 'teamAccepted', 10000)]);
+        submit(x, 'submitTeam', { team: 'Chelsea' });
+        submit(y, 'submitTeam', { team: 'Liverpool' });
+        await accepted;
+        await waitForAll([x, y], 'openGuess', 20000);
+
+        const originalId = x.id;
+        const down = waitFor(x, 'disconnect', 5000);
+        const seen = waitFor(y, 'opponentDisconnectedTemporarily', 8000);
+        x.io.engine.close();
+        await down;
+        await seen;
+
+        await slow.control({ type: 'setLookupMode', mode: 'delay' }, 'modeSet');
+        const lookupStarted = slow.nextMessage('lookupPending', 12000);
+        const up = waitFor(x, 'connect', 8000);
+        x.connect();
+        await up;
+        await lookupStarted;
+        assert.strictEqual(x.id, originalId, 'the player should have recovered');
+
+        // Y wins the first game while the check — and so the save — is waiting.
+        const firstOver = Promise.all([waitFor(x, 'gameOver', 20000), waitFor(y, 'gameOver', 20000)]);
+        submit(y, 'submitGuess', { guess: 'Mohamed Salah' });
+        await firstOver;
+
+        const restarting = Promise.all([
+          waitFor(x, 'rematchStarting', 20000), waitFor(y, 'rematchStarting', 20000),
+        ]);
+        x.emit('requestRematch', {});
+        y.emit('requestRematch', {});
+        await restarting;
+
+        await playRound(x); // the rematch, won by the first player
+        await sleep(2000);
+
+        const { rows } = await db.query(
+          `SELECT m.match_uid, w.username AS winner
+           FROM matches m
+           JOIN players pa ON pa.id = m.player_a
+           LEFT JOIN players w ON w.id = m.winner_id
+           WHERE pa.username IN ('yaris_bir','yaris_iki')
+           ORDER BY m.id`,
+        );
+
+        assert.strictEqual(rows.length, 2,
+          `two games should have produced two rows, found ${rows.length}`);
+        assert.notStrictEqual(rows[0].match_uid, rows[1].match_uid,
+          'both games share one match_uid, so one result was silently dropped');
+        assert.strictEqual(rows[0].winner, 'yaris_iki', 'the first game was won by the second player');
+        assert.strictEqual(rows[1].winner, 'yaris_bir', 'the rematch was won by the first player');
+
+        notes.push('yavaş kimlik kontrolü kayıt beklerken rövanş: gerçek DB\'de 2 satır, 2 farklı match_uid, kazananlar doğru');
+        x.close();
+        y.close();
+      } finally {
+        await slow.stop();
+      }
+    }
+
     // --- 6. signing out reaches the connection, not just the database -------
     {
       const a = await registerAccount(server, 'cikis_hesabi');

@@ -344,5 +344,73 @@ module.exports = async function run() {
     }
   }
 
+  // --- 7. a rematch starting during a save must not steal its id -----------
+  // saveMatch waits for a pending identity check, and a rematch can start inside
+  // that wait. The finished game's id was read after the wait, so it picked up
+  // the NEW game's id — and when the rematch was saved it collided, and
+  // ON CONFLICT DO NOTHING threw the second result away silently.
+  {
+    const server = await startAuthServer({ AUTH_LOOKUP_DELAY_MS: '3500' });
+    try {
+      const { a, b } = await pair(server);
+      const opened = waitForAll([a, b], 'openGuess', 12000);
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
+      await opened;
+
+      // A's session stays valid, so the check will succeed — but it is slow, and
+      // the save waits for it.
+      const originalId = await goOffline(a, b);
+      await server.control({ type: 'setLookupMode', mode: 'delay' }, 'modeSet');
+      const lookupStarted = server.nextMessage('lookupPending', 12000);
+      const up = waitFor(a, 'connect', 8000);
+      a.connect();
+      await up;
+      await lookupStarted;
+      assert.strictEqual(a.id, originalId, 'the player should have recovered');
+
+      const saves = server.collect('recordMatchCalled');
+
+      // B wins the first game while the check is still running.
+      const firstOver = waitForAll([a, b], 'gameOver', 15000);
+      submit(b, 'submitGuess', { guess: 'Mohamed Salah' });
+      await firstOver;
+
+      // And a rematch starts before the save has finished waiting.
+      const restarting = waitForAll([a, b], 'rematchStarting', 12000);
+      b.emit('requestRematch', {});
+      a.emit('requestRematch', {});
+      await restarting;
+
+      // Play the rematch out, won by the other player this time.
+      await waitForAll([a, b], 'openTeamSubmit', 15000);
+      const acceptedAgain = Promise.all([waitFor(a, 'teamAccepted', 8000), waitFor(b, 'teamAccepted', 8000)]);
+      submit(a, 'submitTeam', { team: 'Chelsea' });
+      submit(b, 'submitTeam', { team: 'Liverpool' });
+      await acceptedAgain;
+      await waitForAll([a, b], 'openGuess', 15000);
+      const secondOver = waitForAll([a, b], 'gameOver', 15000);
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
+      await secondOver;
+      await sleep(1200);
+
+      const records = saves.map((m) => m.data);
+      assert.strictEqual(records.length, 2,
+        `expected two saves, got ${records.length}`);
+      assert.notStrictEqual(records[0].matchUid, records[1].matchUid,
+        'both games were saved under one id, so the second would be silently dropped');
+
+      // And each result is the right way round.
+      assert.strictEqual(records[0].winnerId, 202, 'the first game was won by the other player');
+      assert.strictEqual(records[1].winnerId, 101, 'the rematch was won by the returning player');
+
+      notes.push('kayıt beklerken başlayan rövanş kimliği çalmıyor: 2 kayıt, 2 farklı kimlik, skorlar doğru yönde');
+      a.close();
+      b.close();
+    } finally {
+      await server.stop();
+    }
+  }
+
   return notes.join(' · ');
 };
