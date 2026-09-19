@@ -330,6 +330,15 @@ function noteServerTime(serverNow) {
 
 socket.on('clock', ({ serverNow }) => noteServerTime(serverNow));
 
+// The server has taken this connection's identity away: the session was ended
+// elsewhere, or the account was deleted. Clear the stored token so the browser
+// stops presenting it, and say so rather than leaving a signed-in-looking UI
+// that no longer is.
+socket.on('sessionEnded', () => {
+  Accounts.forget();
+  lobbyStatus.textContent = 'Oturumun sona erdi, tekrar giriş yapabilirsin.';
+});
+
 /** How long is really left, by the server's clock. */
 function remainingMs(closesAt, fallbackMs) {
   if (typeof closesAt !== 'number' || !closesAt) return fallbackMs || 0;

@@ -115,6 +115,19 @@ function renderIndex() {
   return indexCache;
 }
 
+/**
+ * Wraps an async route so a rejected promise becomes a response.
+ *
+ * Express 4 does not catch a rejection from an async handler: it is an
+ * unhandled rejection, and the request is simply never answered. The client
+ * waits until its own timeout, which is indistinguishable from the server being
+ * down — a UNIQUE violation inside account deletion used to hang the request for
+ * minutes rather than failing it.
+ */
+const wrap = (handler) => (req, res, next) => {
+  Promise.resolve(handler(req, res, next)).catch(next);
+};
+
 app.get('/', (req, res) => res.type('html').send(renderIndex()));
 
 app.get('/manifest.webmanifest', (req, res) => {
@@ -184,7 +197,7 @@ function requireDb(res) {
   return false;
 }
 
-app.post('/api/register', limitRegister, async (req, res) => {
+app.post('/api/register', limitRegister, wrap(async (req, res) => {
   if (!requireDb(res)) return;
   try {
     const { username, password, displayName } = req.body || {};
@@ -195,9 +208,9 @@ app.post('/api/register', limitRegister, async (req, res) => {
     console.error('register failed:', err.message);
     res.status(500).json({ error: 'server_error' });
   }
-});
+}));
 
-app.post('/api/login', limitLogin, async (req, res) => {
+app.post('/api/login', limitLogin, wrap(async (req, res) => {
   if (!requireDb(res)) return;
   try {
     const { username, password } = req.body || {};
@@ -220,7 +233,7 @@ app.post('/api/login', limitLogin, async (req, res) => {
     console.error('login failed:', err.message);
     res.status(500).json({ error: 'server_error' });
   }
-});
+}));
 
 // The token travels in a header, not the query string: URLs end up in server
 // logs, browser history and Referer headers.
@@ -229,46 +242,55 @@ function tokenFrom(req) {
   return header.startsWith('Bearer ') ? header.slice(7) : '';
 }
 
-app.get('/api/me', async (req, res) => {
+app.get('/api/me', wrap(async (req, res) => {
   if (!requireDb(res)) return;
   const player = await accounts.playerForToken(tokenFrom(req));
   if (!player) return res.status(401).json({ reason: 'not_signed_in' });
   res.json({ player: await accounts.profile(player.username) });
-});
+}));
 
 // Data portability and erasure. Both require the password again: a stolen
 // token should not be enough to download someone's history or wipe them out.
-app.post('/api/account/export', limitAccount, async (req, res) => {
+app.post('/api/account/export', limitAccount, wrap(async (req, res) => {
   if (!requireDb(res)) return;
   const player = await accounts.playerForToken(tokenFrom(req));
   if (!player) return res.status(401).json({ reason: 'not_signed_in' });
-  const check = await accounts.login(player.username, (req.body || {}).password);
-  if (!check.ok) return res.status(403).json({ reason: 'bad_credentials' });
+  // Checked without signing in again: login() mints a session, so asking to
+  // export your own data used to leave an extra live token behind.
+  if (!(await accounts.verifyCredentials(player.id, (req.body || {}).password))) {
+    return res.status(403).json({ reason: 'bad_credentials' });
+  }
   const data = await accounts.exportAccount(player.id);
   if (!data) return res.status(404).json({ reason: 'not_found' });
   res.set('Content-Disposition', `attachment; filename="${player.username}-verilerim.json"`);
   res.json(data);
-});
+}));
 
-app.post('/api/account/delete', limitAccount, async (req, res) => {
+app.post('/api/account/delete', limitAccount, wrap(async (req, res) => {
   if (!requireDb(res)) return;
   const player = await accounts.playerForToken(tokenFrom(req));
   if (!player) return res.status(401).json({ reason: 'not_signed_in' });
-  const check = await accounts.login(player.username, (req.body || {}).password);
-  if (!check.ok) return res.status(403).json({ reason: 'bad_credentials' });
+  if (!(await accounts.verifyCredentials(player.id, (req.body || {}).password))) {
+    return res.status(403).json({ reason: 'bad_credentials' });
+  }
   const done = await accounts.deleteAccount(player.id);
   if (!done) return res.status(404).json({ reason: 'not_found' });
+  // The account is gone; nothing holding its identity may keep using it.
+  revokeAccountSockets({ playerId: player.id });
   console.log(`account deleted: id=${player.id}`);
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/logout', async (req, res) => {
+app.post('/api/logout', wrap(async (req, res) => {
   if (!requireDb(res)) return;
-  await accounts.endSession(tokenFrom(req));
+  const token = tokenFrom(req);
+  await accounts.endSession(token);
+  // Signing out has to reach the game, not just the database and this tab.
+  revokeAccountSockets({ token });
   res.json({ ok: true });
-});
+}));
 
-app.get('/api/leaderboard', async (req, res) => {
+app.get('/api/leaderboard', wrap(async (req, res) => {
   if (!requireDb(res)) return;
   try {
     res.json({ entries: await accounts.leaderboard(50), tiers: accounts.TIERS });
@@ -276,14 +298,14 @@ app.get('/api/leaderboard', async (req, res) => {
     console.error('leaderboard failed:', err.message);
     res.status(500).json({ error: 'server_error' });
   }
-});
+}));
 
-app.get('/api/profile/:username', async (req, res) => {
+app.get('/api/profile/:username', wrap(async (req, res) => {
   if (!requireDb(res)) return;
   const stats = await accounts.profile(req.params.username);
   if (!stats) return res.status(404).json({ error: 'not_found' });
   res.json(stats);
-});
+}));
 
 app.get('/api/config', (req, res) => {
   res.json({
@@ -313,7 +335,7 @@ app.get('/debug/snapshot', requireDebugAccess, limitDebug, (req, res) => {
 // which Wikidata items each club name resolved to, and what the common player
 // list actually contains — so a "that player should have counted" report can
 // be checked against real data instead of guessed at.
-app.get('/debug/lookup', requireDebugAccess, limitDebug, async (req, res) => {
+app.get('/debug/lookup', requireDebugAccess, limitDebug, wrap(async (req, res) => {
   const [teamA, teamB] = await Promise.all([
     resolveTeamInput(req.query.a),
     resolveTeamInput(req.query.b),
@@ -339,6 +361,21 @@ app.get('/debug/lookup', requireDebugAccess, limitDebug, async (req, res) => {
     snapshotLoaded: squadStore.info().loaded,
     players: lookup.ok ? lookup.players.map((p) => p.name) : undefined,
   });
+}));
+
+/**
+ * The last word on any request that threw.
+ *
+ * Installed after every route, which is how Express finds it. Without it a
+ * handler that throws answers nothing at all, and the message it would have
+ * leaked is a stack trace — so the log gets the detail and the client gets a
+ * status and a reason it can act on.
+ */
+// eslint-disable-next-line no-unused-vars -- Express needs the 4-arg shape
+app.use((err, req, res, next) => {
+  console.error(`unhandled error on ${req.method} ${req.path}:`, err && err.message);
+  if (res.headersSent) return;
+  res.status(500).json({ error: 'server_error' });
 });
 
 const server = http.createServer(app);
@@ -432,7 +469,10 @@ io.use((socket, next) => {
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth && socket.handshake.auth.token;
-    if (token) socket.data.account = await accounts.playerForToken(token);
+    if (token) {
+      socket.data.sessionToken = String(token);
+      socket.data.account = await accounts.playerForToken(token);
+    }
   } catch (err) {
     console.error('session lookup failed:', err.message);
   }
@@ -529,12 +569,32 @@ function dropPendingInvite(socket) {
  *
  * @returns {boolean} whether a room was actually created.
  */
+/**
+ * Two connections signed into the SAME account are not two players.
+ *
+ * Nothing stops someone opening the game twice in one browser, and until this
+ * check the two tabs could be matched with each other: the result was a
+ * recorded game with the same id on both sides, which the stats query counts
+ * once for that player — a win against nobody, awarded on demand.
+ *
+ * Guests are always distinct: an unsigned-in player has no account to share.
+ */
+function sameAccount(socketA, socketB) {
+  const a = accountIdOf(socketA);
+  const b = accountIdOf(socketB);
+  return Boolean(a) && a === b;
+}
+
 function createRoom(socketA, socketB) {
   if (!socketA || !socketB || socketA.id === socketB.id) {
     console.error('createRoom called with one socket on both sides — ignoring');
     return false;
   }
   if (!isAvailableForMatch(socketA) || !isAvailableForMatch(socketB)) return false;
+  if (sameAccount(socketA, socketB)) {
+    console.error('refusing to match an account against itself:', accountIdOf(socketA));
+    return false;
+  }
 
   // Commit both players before anything can await, and retire any join
   // attempt either of them still has in flight.
@@ -548,6 +608,9 @@ function createRoom(socketA, socketB) {
   const roomId = randomUUID();
   const room = {
     id: roomId,
+    // Identifies this GAME, not the room: a rematch is a new game in the same
+    // room and gets a new one. It is what makes saving the result idempotent.
+    gameId: randomUUID(),
     players: [
       { socketId: socketA.id, name: nameFor(socketA), accountId: accountIdOf(socketA) },
       { socketId: socketB.id, name: nameFor(socketB), accountId: accountIdOf(socketB) },
@@ -887,6 +950,7 @@ async function saveMatch(room, { scoreA, scoreB, winnerSocketId }) {
     : null;
   try {
     await accounts.recordMatch({
+      matchUid: room.gameId,
       playerAId: a.accountId,
       playerBId: b.accountId,
       scoreA,
@@ -918,6 +982,38 @@ async function sendStatsUpdate(room) {
   sendHeadToHead(room);
 }
 
+/**
+ * Takes a player's identity away from the connections that already have it.
+ *
+ * socket.data.account is read once, when the connection is authenticated, so a
+ * session ended over HTTP left every socket already holding that identity still
+ * using it — signed out in the browser, still signed in on the wire. Recovery
+ * made it worse: it restores socket.data wholesale and skips the middleware, so
+ * a reconnect brought the revoked identity back.
+ *
+ * Their seat in a running game loses its account too, so the game finishes but
+ * is not recorded against someone who is no longer signed in.
+ */
+function revokeAccountSockets({ playerId = null, token = null } = {}) {
+  let revoked = 0;
+  for (const socket of io.of('/').sockets.values()) {
+    const matchesToken = token && socket.data.sessionToken === String(token);
+    const matchesPlayer = playerId && socket.data.account && socket.data.account.id === playerId;
+    if (!matchesToken && !matchesPlayer) continue;
+
+    socket.data.account = null;
+    socket.data.sessionToken = null;
+    const room = rooms.get(socket.data.roomId);
+    if (room) {
+      const seat = room.players.find((pl) => pl.socketId === socket.id);
+      if (seat) seat.accountId = null;
+    }
+    socket.emit('sessionEnded');
+    revoked += 1;
+  }
+  return revoked;
+}
+
 io.on('connection', (socket) => {
   // A clock sample the client can trust.
   //
@@ -934,6 +1030,29 @@ io.on('connection', (socket) => {
   if (!socket.recovered) {
     socket.data.name = null;
     socket.data.roomId = null;
+  }
+
+  // Recovery restores socket.data and skips the middlewares, so the identity
+  // that comes back is whatever this socket had before it dropped — including a
+  // session that has been ended or an account that has been deleted since. It
+  // is re-checked against the database rather than trusted.
+  if (socket.recovered && socket.data.sessionToken) {
+    const token = socket.data.sessionToken;
+    accounts.playerForToken(token).then((player) => {
+      if (socket.data.sessionToken !== token) return; // changed while we asked
+      if (player) {
+        socket.data.account = player;
+        return;
+      }
+      socket.data.account = null;
+      socket.data.sessionToken = null;
+      const room = rooms.get(socket.data.roomId);
+      if (room) {
+        const seat = room.players.find((pl) => pl.socketId === socket.id);
+        if (seat) seat.accountId = null;
+      }
+      socket.emit('sessionEnded');
+    }, (err) => console.error('session re-check failed:', err.message));
   }
 
   if (socket.recovered && socket.data.roomId) {
@@ -981,12 +1100,28 @@ io.on('connection', (socket) => {
 
     // Pull opponents off the front until one is genuinely free. Someone who
     // left, or who joined a friend's invite while waiting here, is stale.
+    //
+    // Your own other tab is not an opponent, but it is not stale either: it is
+    // set aside and put back, and the scan carries on. Stopping at it would
+    // leave you waiting while a perfectly good stranger sat behind it.
+    const setAside = [];
+    let paired = false;
     while (queue.length) {
       const opponent = queue.shift();
       if (opponent.id === socket.id) continue;
       if (!isAvailableForMatch(opponent)) continue;
-      if (createRoom(opponent, socket)) return;
+      if (sameAccount(opponent, socket)) {
+        setAside.push(opponent);
+        continue;
+      }
+      if (createRoom(opponent, socket)) {
+        paired = true;
+        break;
+      }
     }
+    // Back at the front, in the order they were waiting.
+    for (let i = setAside.length - 1; i >= 0; i -= 1) queue.unshift(setAside[i]);
+    if (paired) return;
 
     queue.push(socket);
     socket.emit('waiting');
@@ -1069,6 +1204,12 @@ io.on('connection', (socket) => {
     }
     if (!isAvailableForMatch(hostSocket)) {
       socket.emit('errorMessage', { message: 'Bu oda çoktan dolmuş.' });
+      return;
+    }
+    // Joining your own invite from a second tab while signed into the same
+    // account is the same problem as matching yourself in the queue.
+    if (sameAccount(hostSocket, socket)) {
+      socket.emit('errorMessage', { message: 'Bu hesap zaten bu odada — kendinle oynayamazsın.' });
       return;
     }
 
@@ -1242,6 +1383,9 @@ io.on('connection', (socket) => {
     if (ids.every((id) => room.rematchRequests.has(id))) {
       room.rematchRequests.clear();
       room.round = 0;
+      // A new game, so a new id — otherwise the rematch's result would collide
+      // with the first game's row and be silently dropped.
+      room.gameId = randomUUID();
       for (const id of ids) room.scores[id] = 0;
       io.to(room.id).emit('rematchStarting');
       startRound(room);

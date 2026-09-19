@@ -24,6 +24,13 @@ npm run test:browser     # tarayıcı testleri — Playwright gerekir
 npm test -- socket       # tek test (isim filtresi)
 ```
 
+`npm test` veritabanı gerektiren testleri `TEST_DATABASE_URL` yoksa **atlar** ve
+atlandıklarını yazar. Tam sonuç için:
+
+```bash
+TEST_DATABASE_URL=postgres://... npm test
+```
+
 **Veritabanı politikası.** Testler `DATABASE_URL` değerini **miras almaz** —
 test sunucusu açılışta migration ve oturum temizliği çalıştırdığı için, miras
 alınan bir üretim adresi canlı veriye yazmak demekti. Veritabanı isteyen
@@ -64,6 +71,7 @@ koşusu olarak ayrı raporlar.
 | `recovery` | Yeniden bağlanma: çevrimdışıyken kuyruğa giren takım/cevap sonraki denemeye taşınmıyor (`stale_round`, deneme bütçesi harcanmadan); dönen oyuncuya replay edilen olayın eski süresi değil **mutlak bitiş zamanından hesaplanan gerçek kalan süre** veriliyor; `phaseSync` odanın güncel halini gönderiyor. Her senaryoda host/oyuncunun gerçekten recovery yaptığı (aynı socket id + `recovered`) doğrulanıyor | — |
 | `pending-join` | Host'u beklerken: yinelenen davet hata yaymıyor, `leaveRoom` iptal ediyor, kuyruğa geçiş / **kendi davetini oluşturma** / **zaten kuyruktayken kuyruğu yeniden seçme** eski daveti geçersizleştiriyor. Host'un gerçekten recovery yaptığı (aynı socket id + `recovered`) testte doğrulanıyor | — |
 | `room-integrity` | Tekrarlı `joinQueue` tek maç; kendi davetine katılma reddi; tekrar davet aynı kodu döner | — |
+| `account-integrity` | **Gerçek izole PostgreSQL gerekir.** Aynı hesap kendisiyle eşleşmiyor (kuyruk + davet) ve `matches_distinct_players` kısıtı bunu veritabanında da engelliyor; aynı oyun kimliğiyle iki kayıt denemesi 1 satır (rövanş ayrı kimlik); çıkış/silme açık **ve yeniden bağlanan** soketlerin kimliğini düşürüyor, o maç kayda geçmiyor; hesap silme tek transaction, mezar taşı `deleted:<id>` (kullanıcı adı kuralı üretemez), eşzamanlı iki silmeden biri 404; veritabanı ölüyken istek askıda kalmıyor, 500 dönüyor | ✔ |
 | `double-match` | Davet kabulü kuyruğu temizler; oyundaki oyuncu tekrar eşleşmez; başarılı katılım hata yaymaz; geçersiz kod sırayı düşürmez | — |
 | `browser/full-match` | 5 tur + tur sayacı sınırı + rövanş | — |
 | `browser/second-match` | Aynı istemcide iki ardışık maç. Deneme sayacı her odada sıfırdan saydığı için, ikinci maçın olayları birincisinden "daha eski" görünüp yok sayılabiliyordu — oyuncu ilerlemeyen bir ekranda kalıyordu | — |

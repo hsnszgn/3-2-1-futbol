@@ -130,6 +130,23 @@ async function login(rawUsername, password) {
   };
 }
 
+/**
+ * Checks a password without signing anyone in.
+ *
+ * Re-authentication before a destructive action used to call login(), which
+ * mints a session as a side effect — so asking to export your data left an
+ * extra live token behind. This answers the only question being asked.
+ */
+async function verifyCredentials(playerId, password) {
+  if (!db.isEnabled()) return false;
+  const { rows } = await db.query(
+    'SELECT password_hash FROM players WHERE id = $1 AND deleted_at IS NULL',
+    [playerId],
+  );
+  if (!rows[0]) return false;
+  return verifyPassword(String(password || ''), rows[0].password_hash);
+}
+
 async function createSession(playerId) {
   const token = crypto.randomBytes(32).toString('hex');
   await db.query(
@@ -157,6 +174,16 @@ async function endSession(token) {
   await db.query('DELETE FROM sessions WHERE token = $1', [String(token)]);
 }
 
+/**
+ * Ends every session a player holds — used when an account is deleted, and
+ * available for a "sign out everywhere" action.
+ */
+async function endAllSessions(playerId) {
+  if (!db.isEnabled()) return 0;
+  const { rowCount } = await db.query('DELETE FROM sessions WHERE player_id = $1', [playerId]);
+  return rowCount;
+}
+
 /** Expired rows are dead weight; clear them out periodically. */
 async function purgeExpiredSessions() {
   if (!db.isEnabled()) return 0;
@@ -164,12 +191,35 @@ async function purgeExpiredSessions() {
   return rowCount;
 }
 
-async function recordMatch({ playerAId, playerBId, scoreA, scoreB, winnerId }) {
-  await db.query(
-    `INSERT INTO matches (player_a, player_b, score_a, score_b, winner_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [playerAId, playerBId, scoreA, scoreB, winnerId],
+/**
+ * Records a finished game, at most once.
+ *
+ * `matchUid` is minted when the game starts and is the same for every attempt
+ * to save it, so a retry, a duplicated end-of-game transition or two servers
+ * racing each other all end up with one row. Without it, one extra call was one
+ * extra game in everybody's record.
+ *
+ * @returns {Promise<boolean>} true if this call is the one that wrote the row.
+ */
+async function recordMatch({ playerAId, playerBId, scoreA, scoreB, winnerId, matchUid }) {
+  // A game against yourself is not a game. The matchmaker refuses to build one
+  // and the table has a constraint against it; this is the third place, because
+  // a recorded self-match is a free win that silently inflates a leaderboard.
+  if (!playerAId || !playerBId || playerAId === playerBId) {
+    console.error('refusing to record a match with one player on both sides:', playerAId);
+    return false;
+  }
+  if (!matchUid) {
+    console.error('refusing to record a match without an id');
+    return false;
+  }
+  const { rowCount } = await db.query(
+    `INSERT INTO matches (player_a, player_b, score_a, score_b, winner_id, match_uid)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (match_uid) DO NOTHING`,
+    [playerAId, playerBId, scoreA, scoreB, winnerId, String(matchUid)],
   );
+  return rowCount > 0;
 }
 
 async function leaderboard(limit = 50) {
@@ -255,18 +305,43 @@ async function exportAccount(playerId) {
  * it. Identifying fields are cleared, the password and every session are
  * destroyed, and the account can no longer be logged into or seen anywhere.
  */
+/**
+ * Anonymises an account and ends every session it has, atomically.
+ *
+ * Two things were wrong before. It ran as two independent queries, so a failure
+ * between them left the sessions deleted and the account still live — signed
+ * out everywhere but not deleted. And the tombstone username was
+ * `silinmis_<id>`, which any player could have registered first: usernames are
+ * [a-z0-9_], so `silinmis_42` is a perfectly legal name, and deleting player 42
+ * would then fail on the UNIQUE constraint. The tombstone now uses a colon,
+ * which the username rules can never produce.
+ *
+ * The row itself stays. The OPPONENT's match history and head-to-head record
+ * are built from it, and deleting one player must not erase another player's
+ * wins.
+ */
 async function deleteAccount(playerId) {
-  await db.query('DELETE FROM sessions WHERE player_id = $1', [playerId]);
-  const { rowCount } = await db.query(
-    `UPDATE players
-     SET username = 'silinmis_' || id,
-         display_name = 'Silinmiş oyuncu',
-         password_hash = '',
-         deleted_at = now()
-     WHERE id = $1 AND deleted_at IS NULL`,
-    [playerId],
-  );
-  return rowCount > 0;
+  return db.transaction(async (client) => {
+    // Lock the row first, so two delete requests arriving together are
+    // serialised rather than both reading "not yet deleted".
+    const { rows } = await client.query(
+      'SELECT id, deleted_at FROM players WHERE id = $1 FOR UPDATE',
+      [playerId],
+    );
+    if (!rows[0] || rows[0].deleted_at) return false;
+
+    await client.query('DELETE FROM sessions WHERE player_id = $1', [playerId]);
+    await client.query(
+      `UPDATE players
+       SET username = 'deleted:' || id,
+           display_name = 'Silinmiş oyuncu',
+           password_hash = '',
+           deleted_at = now()
+       WHERE id = $1`,
+      [playerId],
+    );
+    return true;
+  });
 }
 
 /** Same as profile(), for a player we already know by id. */
@@ -302,7 +377,9 @@ module.exports = {
   register,
   login,
   playerForToken,
+  verifyCredentials,
   endSession,
+  endAllSessions,
   purgeExpiredSessions,
   exportAccount,
   deleteAccount,

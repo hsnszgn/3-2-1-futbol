@@ -32,6 +32,31 @@ async function query(text, params) {
   return pool.query(text, params);
 }
 
+/**
+ * Runs `fn` inside a transaction on ONE connection, so the statements inside it
+ * either all land or none do.
+ *
+ * db.query() takes an arbitrary connection from the pool, which means a
+ * multi-statement operation written with it is not atomic: a crash between two
+ * calls leaves the halfway state committed. Account deletion is the case that
+ * matters — half a deletion is worse than none.
+ */
+async function transaction(fn) {
+  if (!pool) throw new Error('database not configured');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS players (
     id            SERIAL PRIMARY KEY,
@@ -76,6 +101,31 @@ const SCHEMA = `
 
   CREATE INDEX IF NOT EXISTS matches_player_a_idx ON matches(player_a);
   CREATE INDEX IF NOT EXISTS matches_player_b_idx ON matches(player_b);
+
+  -- A game is between two different people. Enforced here as well as in the
+  -- matchmaker, because the stats query counts a row once per player and a row
+  -- with the same id on both sides is a free win that no amount of application
+  -- logic can be trusted to have prevented.
+  --
+  -- NOT VALID on purpose: it applies to every new row but does not re-check
+  -- rows already in the table. A deployment whose history contains such a row
+  -- must not fail its migration and switch accounts off for everyone; the bad
+  -- row is a separate, deliberate clean-up.
+  DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'matches_distinct_players') THEN
+      ALTER TABLE matches
+        ADD CONSTRAINT matches_distinct_players CHECK (player_a <> player_b) NOT VALID;
+    END IF;
+  END $$;
+
+  -- One game, one row, however many times the server tries to save it. The id
+  -- is minted when the game starts, so a retry or a double call to endGame
+  -- carries the same one and the second insert does nothing.
+  ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_uid TEXT;
+
+  -- Rows written before this column existed have NULL, and Postgres allows any
+  -- number of NULLs in a unique index, so no back-fill is needed.
+  CREATE UNIQUE INDEX IF NOT EXISTS matches_match_uid_key ON matches(match_uid);
 `;
 
 async function migrate() {
@@ -116,4 +166,4 @@ async function close() {
   if (pool) await pool.end().catch(() => {});
 }
 
-module.exports = { isEnabled, query, migrate, close, STATS_SELECT };
+module.exports = { isEnabled, query, transaction, migrate, close, STATS_SELECT };

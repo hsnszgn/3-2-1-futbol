@@ -232,6 +232,16 @@ const Accounts = (() => {
     // Tell the server first: while the token is still set, the request carries
     // it, and the session must end there and not just in this browser.
     api('/api/logout', { method: 'POST' }).catch(() => {});
+    forget();
+  }
+
+  /**
+   * Drops this browser's session without telling the server — for when the
+   * server is the one that ended it (signed out from another device, or the
+   * account was deleted). Keeping the token after that leaves a signed-in
+   * looking UI presenting a credential that no longer works.
+   */
+  function forget() {
     saveToken('');
     me = null;
     paintAccountCard();
@@ -269,6 +279,7 @@ const Accounts = (() => {
     isEnabled: () => enabled,
     getMe: () => me,
     setMe: (player) => { me = player; paintAccountCard(); },
+    forget,
     onChange: (fn) => changeHandlers.push(fn),
     refreshMe,
   };
