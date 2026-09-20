@@ -95,7 +95,9 @@ async function main() {
         ...(spec.mod.env || {}),
         ...(spec.mod.needsDatabase ? { DATABASE_URL: TEST_DB } : {}),
       });
-      const detail = await spec.mod.run({ browser, baseUrl: server.url });
+      // A spec that drives the server's own state (a readiness gate, a
+      // controlled account lookup) needs the handle, not just the URL.
+      const detail = await spec.mod.run({ browser, baseUrl: server.url, server });
       console.log(`GEÇTİ (${Date.now() - started}ms)`);
       if (detail) console.log(`      ${detail}`);
       results.push({ name: spec.name, ok: true });

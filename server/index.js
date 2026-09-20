@@ -36,7 +36,10 @@ const MAX_ROUNDS = Number(process.env.MAX_ROUNDS) || 5;
 const TEAM_SUBMIT_MS = Number(process.env.TEAM_SUBMIT_MS) || 12000;
 const PLAYER_GUESS_MS = Number(process.env.PLAYER_GUESS_MS) || 25000;
 const NEXT_ROUND_DELAY_MS = Number(process.env.NEXT_ROUND_DELAY_MS) || 3500;
-const RECONNECT_GRACE_MS = 12000;
+// How long a room waits for a dropped player before it is torn down. A knob for
+// the same reason the phase windows are: a test that has to outlive it, or
+// deliberately not outlive it, cannot race a hard-coded twelve seconds.
+const RECONNECT_GRACE_MS = Number(process.env.RECONNECT_GRACE_MS) || 12000;
 
 // Everyone scoring a flat point wasted the tension of a speed game: knowing
 // the answer instantly and dredging it up at the last second paid the same.
@@ -412,7 +415,10 @@ const server = http.createServer(app);
 // reconnect within the window, so gameplay just continues.
 const io = new Server(server, {
   connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000,
+    // How long a dropped socket can be away and still come back as itself. A
+    // knob because it is otherwise untestable: proving what happens when the
+    // window is EXCEEDED would mean a two-minute test.
+    maxDisconnectionDuration: Number(process.env.RECOVERY_WINDOW_MS) || 2 * 60 * 1000,
     skipMiddlewares: true,
   },
   // Nothing this game sends is large. The default 1 MB ceiling is an open
@@ -1197,8 +1203,19 @@ io.on('connection', (socket) => {
       // as it was when it dropped. Tell it what is true now.
       sendPhaseSync(room, socket.id);
     } else {
-      // Room was already torn down before this socket made it back.
+      // Room was already torn down before this socket made it back. Recovery
+      // "succeeded" — same socket, same identity — but there is no game to
+      // return to.
+      //
+      // A belt-and-braces signal, NOT a proven fix: measured with it removed,
+      // the player still lands in the lobby with a reason, because Socket.IO
+      // buffers the room's packets for a session that was away and replays the
+      // opponentLeft that ended the game (three runs, all clean — see
+      // test/browser/recovery-roomgone.spec.js). It stays because that replay is
+      // the adapter's behaviour rather than something this server states, and
+      // the cost of being explicit is one event.
       socket.data.roomId = null;
+      socket.emit('roomGone', { reason: 'disconnected_too_long' });
     }
   }
 

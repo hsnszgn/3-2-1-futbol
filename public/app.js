@@ -13,10 +13,21 @@ const screens = {
   over: document.getElementById('screen-over'),
 };
 
+let currentScreen = 'lobby';
+// Set when a token handover has to wait for a match to end; read by showScreen.
+let pendingTokenHandover = false;
+
 function showScreen(name) {
+  currentScreen = name;
   for (const key in screens) screens[key].classList.toggle('active', key === name);
   // The mute button sits in a different corner during a game — see style.css.
   document.body.classList.toggle('in-game', name === 'game');
+  // A token handover that had to wait for the match to end (see below) happens
+  // here, once there is no room left to lose.
+  if (name === 'lobby' && pendingTokenHandover) {
+    pendingTokenHandover = false;
+    handOverToken();
+  }
 }
 
 const btnMute = document.getElementById('btnMute');
@@ -35,6 +46,12 @@ document.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
 
 // Signing in or out changes who the server thinks we are, and the handshake
 // only happens once — so reconnect to carry the new token.
+function handOverToken() {
+  if (!socket.connected) return; // the next handshake carries it anyway
+  socket.disconnect();
+  socket.connect();
+}
+
 Accounts.onChange((player) => {
   socket.auth = { token: Accounts.getToken() };
   if (player && !nameInput.value.trim()) nameInput.value = player.displayName;
@@ -44,10 +61,17 @@ Accounts.onChange((player) => {
   // off this very connection, and a deliberate reconnect is not a recovery — it
   // gets a new socket with no room, which left a player staring at a game screen
   // whose submissions went nowhere. The match carries on as a guest instead.
-  if (player && socket.connected) {
-    socket.disconnect();
-    socket.connect();
+  if (!player) return;
+
+  // This also fires without anyone touching the page: when a configured account
+  // service becomes available, the stored session is re-verified and the card
+  // comes back. Mid-match that must not cost the player their room, and the
+  // token is not needed until the next match starts — so it waits for the lobby.
+  if (currentScreen === 'game' || currentScreen === 'waiting') {
+    pendingTokenHandover = true;
+    return;
   }
+  handOverToken();
 });
 Accounts.init();
 
@@ -212,8 +236,64 @@ function markPip(round, outcome) {
   if (outcome) pip.classList.add(outcome);
 }
 
+// Set while a match is on and the connection has gone away; read by the connect
+// handler below, so it is declared before it.
+let droppedInMatch = false;
+
 socket.on('connect', () => {
   mySocketId = socket.id;
+  if (!droppedInMatch) return;
+  droppedInMatch = false;
+
+  if (socket.recovered) {
+    // Connection state recovery brought this socket back into its room, and the
+    // server follows with a phaseSync carrying the current truth — so the only
+    // thing left is to take the warning down.
+    teamFeedback.textContent = '';
+    guessFeedback.textContent = '';
+    return;
+  }
+  // The recovery window passed while we were away: this is a brand-new socket
+  // with no room, and every submission from here would go nowhere. Say so and
+  // go back to somewhere that works.
+  endMatchAfterDrop('Bağlantın çok uzun süre koptu, maç sona erdi. Yeni maç kurabilirsin.');
+});
+
+// --- our own connection dropping -------------------------------------------
+// Recovery is the normal case on a phone and needs no ceremony beyond saying
+// what is happening. What must not happen is the silent case: coming back to a
+// game that is no longer there and being left on its screen.
+
+function inMatchScreen() {
+  return currentScreen === 'game' || currentScreen === 'waiting';
+}
+
+function endMatchAfterDrop(message) {
+  if (!inMatchScreen()) return;
+  clearInterval(teamTimerInterval);
+  clearInterval(guessTimerInterval);
+  showScreen('lobby');
+  lobbyStatus.textContent = message;
+}
+
+socket.on('disconnect', (reason) => {
+  // Handing over a new token (see Accounts.onChange) is a deliberate reconnect,
+  // not a lost connection.
+  if (reason === 'io client disconnect') return;
+  if (!inMatchScreen()) return;
+  droppedInMatch = true;
+  for (const el of [teamFeedback, guessFeedback]) {
+    el.textContent = 'Bağlantın koptu, yeniden bağlanılıyor...';
+    el.className = 'feedback error';
+  }
+});
+
+// Recovery worked, but the room was torn down while we were away — the server
+// says so explicitly, because the opponentLeft that ended the game could not
+// reach a socket that was not in the room at the time.
+socket.on('roomGone', () => {
+  droppedInMatch = false;
+  endMatchAfterDrop('Bağlantın çok uzun süre koptu, maç sona erdi. Yeni maç kurabilirsin.');
 });
 
 socket.on('matched', ({ opponentName, myName: serverName, maxRounds: mr }) => {
@@ -761,15 +841,6 @@ socket.on('opponentDisconnectedTemporarily', () => {
 socket.on('opponentReconnected', () => {
   teamFeedback.textContent = connectionNotice || '';
   guessFeedback.textContent = connectionNotice || '';
-});
-
-socket.io.on('reconnect', () => {
-  // Our own connection dropped and came back — re-announce identity/room
-  // membership isn't needed (connection state recovery restores it
-  // server-side), but let the player know play can continue.
-  if (screens.game.classList.contains('active')) {
-    lobbyStatus.textContent = '';
-  }
 });
 
 const btnRematch = document.getElementById('btnRematch');

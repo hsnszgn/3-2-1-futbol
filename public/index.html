@@ -73,6 +73,14 @@
         </div>
       </div>
 
+      <!-- Accounts are configured but not usable yet (migration still running,
+           database unreachable). Says so, keeps trying, and offers a retry —
+           rather than looking like a deployment that simply has no accounts. -->
+      <div id="accountNotice" class="account-notice hidden">
+        <span id="accountNoticeText"></span>
+        <button id="btnAccountRetry" class="btn btn-text btn-inline">Tekrar dene</button>
+      </div>
+
       <div id="inviteBanner" class="invite-banner hidden">
         <span class="invite-label">Odaya davet edildin</span>
         <span class="invite-code" id="inviteCode"></span>

@@ -179,13 +179,40 @@ aralıklarla yeniden denenir (`MIGRATE_RETRY_MS`, varsayılan 60s).
 | Durum | `accountsConfigured` | `accountsEnabled` | Davranış |
 |---|---|---|---|
 | `DATABASE_URL` yok | `false` | `false` | Hesap arayüzü hiç görünmez, oyun eskisi gibi çalışır |
-| Var ama şema kurulamadı | `true` | `false` | Hesap arayüzü **yine görünmez**; API `503 accounts_unavailable` döner |
+| Var ama şema kurulamadı | `true` | `false` | Hesap arayüzü **yine görünmez**, yerine geçici bir bilgi satırı çıkar; API `503 accounts_unavailable` döner |
 | Var ve şema hazır | `true` | `true` | Hesaplar çalışır |
 
 İkinci satır bilerek böyle: "bağlantı adresi var" ile "bu çalışıyor" aynı şey
 değil. Migration başarısızken hesap formunu göstermek, oyuncuya çalışmayan bir
 özellik sunmak olurdu. Veritabanı erişilemezken istekler **askıda kalmaz**,
 sınırlı sürede hata döner (`connectionTimeoutMillis` / `query_timeout`).
+
+İkinci durum geçici olduğu için istemci onu ayrı ele alır: "hesap yok" ile
+"hesap şu an hazır değil" farklı gösterilir, sayfa sınırlı bir backoff ile
+(3/6/12/24/30 saniye, en çok 20 deneme) kendi kendine tekrar sorar ve bir
+"Tekrar dene" düğmesi vardır. Servis geldiğinde **sayfa yenilenmeden** hesap
+arayüzü ve saklanan oturum geri gelir. Bu sırada bir maç sürüyorsa jeton devri
+(socket'in yeniden bağlanması) lobiye dönene kadar **ertelenir** — yoksa oyuncu
+odasını kaybederdi.
+
+### Veritabanı TLS'i
+
+| Değişken | Varsayılan | Ne yapar |
+|---|---|---|
+| `DB_SSL` | (boş) | `off`: TLS hiç kullanılmaz. `on`: yerel adres olsa bile doğrulanır. `no-verify`: şifreli ama **sertifika doğrulanmaz** (geçiş kapısı, her açılışta loglanır) |
+| `DB_CA_CERT` | (boş) | Zincir için PEM metni |
+| `DB_CA_CERT_PATH` | (boş) | Aynısı, dosya yolu olarak. Okunamazsa sunucu sessizce doğrulamasız devam **etmez**, hata verir |
+
+Varsayılan davranış: `localhost`/`127.0.0.1`/`::1` için TLS yok (yerel test
+örneklerinin sertifikası da yoktur), diğer her host için **zincir ve host adı
+doğrulanır**. Yerel istisna bağlantı adresinin ayrıştırılmış host alanına bakar;
+parolada veya bir parametrede geçen `localhost` bunu tetiklemez.
+
+Bağlantı adresindeki `sslmode`, `ssl`, `sslrootcert`, `sslcert`, `sslkey`
+parametreleri **ayıklanır ve yok sayılır** (adları loglanır, değerleri değil).
+Sebebi ölçüldü: `pg` bu parametreleri kodda verilen `ssl` nesnesinin yerine
+koyuyor — `?sslmode=no-verify` içeren bir adres, koddaki doğrulamayı sessizce
+kapatıyordu.
 
 ## Kurulum
 

@@ -1,0 +1,94 @@
+# Repeatable verification: a clean checkout, a throwaway PostgreSQL and a real
+# browser, on every push.
+#
+# Why it exists: every result in this project so far has been produced on one
+# machine, by hand. "It passed" then depends on what happened to be installed
+# there — which is exactly the claim an audit cannot check.
+#
+# Two things are deliberate:
+#   * Playwright is pinned HERE and installed with --no-save, not added to
+#     package.json. The production image installs with `npm ci` and must not
+#     download a browser.
+#   * The database-less and the isolated-PostgreSQL runs are separate steps, not
+#     one command. A suite that skipped the account tests has not verified them,
+#     and merging the two numbers would hide that.
+#
+# NOT YET RUN: this file has never executed on GitHub Actions — this repository
+# had no CI at all. Until a run exists, A3 stays open and no result here may be
+# quoted as evidence.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # The version the deployment pins, and the minimum `engines` allows.
+        node: ['24.21.0', '22.22.2']
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testsifre
+          POSTGRES_DB: testdb
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # A throwaway database, named explicitly. Nothing in the suite reads
+      # DATABASE_URL: these tests TRUNCATE tables, so the variable that turns
+      # them on must never be one a production deployment also uses.
+      #
+      # Held under a DIFFERENT name on purpose. Job-level env reaches every step,
+      # so calling it TEST_DATABASE_URL here would hand it to the runs that are
+      # supposed to prove the suite works WITHOUT a database — and those runs
+      # would quietly stop testing that.
+      PG_URL: postgres://postgres:testsifre@127.0.0.1:5432/testdb
+      PLAYWRIGHT_VERSION: 1.56.1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install (lockfile only)
+        run: npm ci
+
+      - name: Node and npm versions actually used
+        run: node -v && npm -v
+
+      - name: Server tests, no database
+        run: npm test
+
+      - name: Server tests, isolated PostgreSQL
+        run: npm test
+        env:
+          TEST_DATABASE_URL: ${{ env.PG_URL }}
+
+      - name: Install pinned Playwright + Chromium
+        run: |
+          npm install --no-save "playwright@${PLAYWRIGHT_VERSION}"
+          npx playwright install --with-deps chromium
+
+      - name: Browser tests, no database
+        run: npm run test:browser
+
+      - name: Browser tests, isolated PostgreSQL
+        run: npm run test:browser
+        env:
+          TEST_DATABASE_URL: ${{ env.PG_URL }}

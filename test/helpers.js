@@ -32,10 +32,12 @@ async function startTestServer(env = {}) {
   const inherited = { ...process.env };
   delete inherited.DATABASE_URL;
 
-  // A test can ask for the fixture whose account service it can control.
-  const entry = env.AUTH_FIXTURE
-    ? path.join(__dirname, 'fixtures', 'auth-server-entry.js')
-    : path.join(__dirname, 'fixtures', 'server-entry.js');
+  // A test can ask for a fixture that makes one part of the server
+  // controllable: AUTH_FIXTURE for the account lookup, or FIXTURE naming any
+  // entry file in test/fixtures. Everything they do not control is the real
+  // production path.
+  const entryFile = env.FIXTURE || (env.AUTH_FIXTURE ? 'auth-server-entry.js' : 'server-entry.js');
+  const entry = path.join(__dirname, 'fixtures', entryFile);
 
   const child = fork(entry, [], {
     cwd: ROOT,

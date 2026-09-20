@@ -8,17 +8,137 @@
 // Without DATABASE_URL the game still runs exactly as before, just with
 // accounts and stats switched off, so local development needs no setup.
 
+const fs = require('fs');
+const net = require('net');
 const { Pool } = require('pg');
 
 const CONNECTION_STRING = process.env.DATABASE_URL || '';
+
+// Hosts that are this machine. Only these skip TLS, and only by PARSED
+// hostname: the previous test was a regex over the whole connection string, so
+// a password containing "localhost", or any parameter mentioning 127.0.0.1,
+// silently turned encryption off for a remote database.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+// SSL settings that `pg-connection-string` reads out of the URL. They do not
+// merely coexist with the `ssl` option — they REPLACE it: measured with
+// pg's own ConnectionParameters, `?sslmode=no-verify` turns an explicit
+// { rejectUnauthorized: true } into { rejectUnauthorized: false }, and
+// `?sslmode=disable` turns it into false. So a connection string handed to us
+// can undo verification from the outside. They are removed from the URL and the
+// decision is made here, in one place, instead.
+const SSL_URL_PARAMS = ['ssl', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslnegotiation'];
+
+function readCa() {
+  const inline = process.env.DB_CA_CERT;
+  if (inline) return inline;
+  const file = process.env.DB_CA_CERT_PATH;
+  if (!file) return null;
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    // Loud, and not a silent downgrade: a CA that was meant to be used and
+    // cannot be read must not turn into "verify against the system store".
+    throw new Error(`DB_CA_CERT_PATH could not be read (${file}): ${err.message}`);
+  }
+}
+
+/**
+ * Works out how to connect, and how to verify the server while doing it.
+ *
+ * Exported for the tests: the interesting cases are a connection string that
+ * tries to weaken TLS and a host that only LOOKS local, and neither can be
+ * driven through a live database.
+ *
+ * @returns {{connectionString: string, ssl: object|false, host: string,
+ *            local: boolean, ignoredParams: string[], verified: boolean}}
+ */
+function sslConfigFor(raw, env = process.env) {
+  let url = null;
+  try {
+    url = new URL(raw);
+  } catch (err) {
+    url = null; // unparseable: treat it as remote, which is the safe direction
+  }
+
+  const host = url ? url.hostname.toLowerCase() : '';
+  const local = Boolean(url) && LOCAL_HOSTS.has(host);
+
+  const ignoredParams = [];
+  let connectionString = raw;
+  if (url) {
+    for (const param of SSL_URL_PARAMS) {
+      if (!url.searchParams.has(param)) continue;
+      ignoredParams.push(param);
+      url.searchParams.delete(param);
+    }
+    connectionString = url.toString();
+  }
+
+  // DB_SSL: 'off' disables TLS outright (a local socket, or a provider-side
+  // tunnel that terminates it), 'on' forces verification even for a local host.
+  // There is no "encrypt but do not check" setting: that is what the old
+  // rejectUnauthorized: false was, and it accepts any certificate at all,
+  // including one a man in the middle just generated.
+  const mode = String(env.DB_SSL || '').toLowerCase();
+  if (mode === 'off') {
+    return { connectionString, ssl: false, host, local, ignoredParams, verified: false };
+  }
+  // The transition escape hatch, and the only way back to the old behaviour:
+  // encrypted but accepting any certificate. It has to be set deliberately, it
+  // is logged on every boot, and it exists because turning verification on for
+  // a provider whose chain has not been confirmed would take accounts down —
+  // not because "it is fine in production".
+  if (mode === 'no-verify') {
+    return {
+      connectionString,
+      ssl: { rejectUnauthorized: false },
+      host,
+      local,
+      ignoredParams,
+      verified: false,
+    };
+  }
+  if (local && mode !== 'on') {
+    return { connectionString, ssl: false, host, local, ignoredParams, verified: false };
+  }
+
+  const ca = readCa();
+  return {
+    connectionString,
+    ssl: {
+      rejectUnauthorized: true,
+      // Checked against the name we are actually asking for, so a valid
+      // certificate for some OTHER host is still refused. An IP address is not
+      // a valid SNI name (RFC 6066) — Node verifies it against the address
+      // instead, so it is left unset there.
+      ...(host && net.isIP(host) === 0 ? { servername: host } : {}),
+      ...(ca ? { ca } : {}),
+    },
+    host,
+    local,
+    ignoredParams,
+    verified: true,
+  };
+}
+
 let pool = null;
 
 if (CONNECTION_STRING) {
+  const tls = sslConfigFor(CONNECTION_STRING);
+  if (tls.ignoredParams.length) {
+    // Names only — a connection string's values are secrets.
+    console.warn('DATABASE_URL SSL parameters ignored (TLS is decided in code):'
+      + ` ${tls.ignoredParams.join(', ')}`);
+  }
+  if (!tls.verified) {
+    const why = tls.ssl ? 'DB_SSL=no-verify — any certificate is accepted'
+      : (tls.local ? 'local host, TLS not used' : 'DB_SSL=off, TLS not used');
+    console.warn(`Database TLS verification is OFF for host "${tls.host || '(unknown)'}" (${why})`);
+  }
   pool = new Pool({
-    connectionString: CONNECTION_STRING,
-    // Hosted Postgres (Neon and friends) terminates TLS with its own chain;
-    // local test instances have none at all.
-    ssl: /localhost|127\.0\.0\.1/.test(CONNECTION_STRING) ? false : { rejectUnauthorized: false },
+    connectionString: tls.connectionString,
+    ssl: tls.ssl,
     max: 5,
     idleTimeoutMillis: 30000,
     // Bounded waits, so a database that has gone away fails the request instead
@@ -186,4 +306,4 @@ async function close() {
   if (pool) await pool.end().catch(() => {});
 }
 
-module.exports = { isEnabled, isReady, query, transaction, migrate, close, STATS_SELECT };
+module.exports = { isEnabled, isReady, query, transaction, migrate, close, sslConfigFor, STATS_SELECT };

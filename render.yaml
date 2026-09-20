@@ -37,3 +37,14 @@ services:
       # accounts switched off.
       - key: DATABASE_URL
         sync: false
+      # Database TLS. Unset means the default: the certificate chain AND the
+      # host name are verified for every non-local host (server/db.js). The
+      # chain of the provider actually in use has NOT been verified from a
+      # deployment yet — so if accounts come up "unavailable" after this
+      # change, the connection is being refused on the certificate, not on the
+      # password. Set DB_SSL=no-verify to get the old behaviour back while that
+      # is sorted out; it is logged on every boot and is not a resting place.
+      # Any sslmode/ssl* parameter inside DATABASE_URL is stripped and ignored,
+      # because pg lets it replace what the code asked for.
+      - key: DB_SSL
+        sync: false
