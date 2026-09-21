@@ -50,14 +50,38 @@ const Accounts = (() => {
     } catch (err) { /* nothing we can do; the session just won't survive a reload */ }
   }
 
+  // No request may hang forever: fetch has no timeout of its own, and a page
+  // waiting on one that never answers looks identical to a broken page.
+  const API_TIMEOUT_MS = 10000;
+
   // The token goes in a header rather than the URL, so it stays out of logs
   // and browser history.
   async function api(path, options = {}) {
     const headers = { ...(options.headers || {}) };
     if (token) headers.Authorization = `Bearer ${token}`;
-    const res = await fetch(path, { ...options, headers });
-    const body = await res.json().catch(() => ({}));
-    return { ok: res.ok, status: res.status, body };
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), API_TIMEOUT_MS) : null;
+    try {
+      const res = await fetch(path, {
+        ...options,
+        headers,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      const body = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, body };
+    } catch (err) {
+      // Offline, DNS failure, a timed-out abort: fetch REJECTS rather than
+      // answering with a status. Uncaught, that rejection took init() itself
+      // down — no button listeners were bound and no recheck was ever
+      // scheduled, so the page could not come back without a reload, which is
+      // the exact failure the recovery work was supposed to remove.
+      //
+      // status 0 means "no answer at all". Callers read that as retryable, not
+      // as a verdict about the service or about the session.
+      return { ok: false, status: 0, body: {}, networkError: true };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // ---------------------------------------------------------------- rendering
@@ -357,8 +381,15 @@ const Accounts = (() => {
     }
     cancelRecheck();
     if (status === READY && was !== READY) {
-      recheckCount = 0;
+      // Re-verify BEFORE calling this a recovery. /api/config saying the service
+      // is ready does not mean the stored session could be read: refreshMe()
+      // puts the state back to UNAVAILABLE when the account endpoint fails, and
+      // the retry budget has to keep counting in that case. Resetting the count
+      // here first produced an endless loop — every config answer reset it, so
+      // the backoff never grew past its first step and the 20-attempt limit was
+      // never reached.
       await refreshMe();
+      if (status === READY) recheckCount = 0;
     }
     return status;
   }
@@ -379,8 +410,9 @@ const Accounts = (() => {
   // --------------------------------------------------------------------- init
 
   async function init() {
-    await readConfig();
-
+    // Listeners first, and never behind an await. Bound after the config read,
+    // a failed first request left the retry button inert — the one control whose
+    // whole purpose is to recover from a failed first request.
     $('btnAuth').addEventListener('click', () => { setMode('login'); showScreen('auth'); });
     $('btnBoard').addEventListener('click', openBoard);
     $('btnLogout').addEventListener('click', logout);
@@ -394,6 +426,8 @@ const Accounts = (() => {
     }
     const retryButton = $('btnAccountRetry');
     if (retryButton) retryButton.addEventListener('click', retryNow);
+
+    return readConfig();
   }
 
   return {

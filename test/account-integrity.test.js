@@ -22,7 +22,7 @@
  */
 const assert = require('assert');
 const { Client } = require('pg');
-const { startTestServer, connectClient, waitFor, waitForAll, submit } = require('./helpers');
+const { startTestServer, connectClient, waitFor, waitForAll, waitForAccounts, submit } = require('./helpers');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -37,6 +37,10 @@ async function openDb(url) {
 }
 
 async function registerAccount(server, username, password = 'sifre123') {
+  // The port is open before the schema exists. Registering into that gap
+  // answers 503, which is the server behaving correctly and the test being
+  // impatient — so wait for readiness rather than assume it.
+  await waitForAccounts(server);
   const res = await fetch(`${server.url}/api/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

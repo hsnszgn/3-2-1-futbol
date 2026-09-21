@@ -67,7 +67,7 @@ Accounts.onChange((player) => {
   // service becomes available, the stored session is re-verified and the card
   // comes back. Mid-match that must not cost the player their room, and the
   // token is not needed until the next match starts — so it waits for the lobby.
-  if (currentScreen === 'game' || currentScreen === 'waiting') {
+  if (inRoomScreen()) {
     pendingTokenHandover = true;
     return;
   }
@@ -248,15 +248,14 @@ socket.on('connect', () => {
   if (socket.recovered) {
     // Connection state recovery brought this socket back into its room, and the
     // server follows with a phaseSync carrying the current truth — so the only
-    // thing left is to take the warning down.
-    teamFeedback.textContent = '';
-    guessFeedback.textContent = '';
+    // thing left is to take the warning down. A rematch still works from here.
+    clearConnectionNote();
     return;
   }
   // The recovery window passed while we were away: this is a brand-new socket
-  // with no room, and every submission from here would go nowhere. Say so and
-  // go back to somewhere that works.
-  endMatchAfterDrop('Bağlantın çok uzun süre koptu, maç sona erdi. Yeni maç kurabilirsin.');
+  // with no room, and every submission from here — a rematch request included —
+  // would go nowhere.
+  roomLost('Bağlantın çok uzun süre koptu, maç sona erdi.');
 });
 
 // --- our own connection dropping -------------------------------------------
@@ -264,12 +263,52 @@ socket.on('connect', () => {
 // what is happening. What must not happen is the silent case: coming back to a
 // game that is no longer there and being left on its screen.
 
-function inMatchScreen() {
-  return currentScreen === 'game' || currentScreen === 'waiting';
+// The screens that depend on a room existing on the server. The result screen
+// belongs here too: the rematch button needs the room the match was played in,
+// so a connection lost on that screen costs just as much as one lost mid-round.
+// Leaving it out left a player tapping a rematch button whose request went to a
+// new socket with no room — the server answered nothing and the button sat
+// disabled forever.
+function inRoomScreen() {
+  return currentScreen === 'game' || currentScreen === 'waiting' || currentScreen === 'over';
 }
 
-function endMatchAfterDrop(message) {
-  if (!inMatchScreen()) return;
+/** "We noticed, we are working on it" — in the place the player is looking. */
+function noteConnectionLost() {
+  if (currentScreen === 'over') {
+    rematchStatus.textContent = 'Bağlantın koptu, yeniden bağlanılıyor...';
+    rematchStatus.className = 'status-line error';
+    return;
+  }
+  for (const el of [teamFeedback, guessFeedback]) {
+    el.textContent = 'Bağlantın koptu, yeniden bağlanılıyor...';
+    el.className = 'feedback error';
+  }
+}
+
+function clearConnectionNote() {
+  if (currentScreen === 'over') {
+    rematchStatus.textContent = '';
+    rematchStatus.className = 'status-line';
+    return;
+  }
+  teamFeedback.textContent = '';
+  guessFeedback.textContent = '';
+}
+
+/**
+ * The room is gone for good. On the result screen the score is worth keeping in
+ * front of the player, so only the rematch goes — with a reason, and a way on.
+ * Anywhere else there is nothing left to look at, so back to the lobby.
+ */
+function roomLost(message) {
+  if (!inRoomScreen()) return;
+  if (currentScreen === 'over') {
+    btnRematch.disabled = true;
+    rematchStatus.textContent = `${message} Lobiye dönüp yeni maç kurabilirsin.`;
+    rematchStatus.className = 'status-line error';
+    return;
+  }
   clearInterval(teamTimerInterval);
   clearInterval(guessTimerInterval);
   showScreen('lobby');
@@ -280,12 +319,9 @@ socket.on('disconnect', (reason) => {
   // Handing over a new token (see Accounts.onChange) is a deliberate reconnect,
   // not a lost connection.
   if (reason === 'io client disconnect') return;
-  if (!inMatchScreen()) return;
+  if (!inRoomScreen()) return;
   droppedInMatch = true;
-  for (const el of [teamFeedback, guessFeedback]) {
-    el.textContent = 'Bağlantın koptu, yeniden bağlanılıyor...';
-    el.className = 'feedback error';
-  }
+  noteConnectionLost();
 });
 
 // Recovery worked, but the room was torn down while we were away — the server
@@ -293,7 +329,7 @@ socket.on('disconnect', (reason) => {
 // reach a socket that was not in the room at the time.
 socket.on('roomGone', () => {
   droppedInMatch = false;
-  endMatchAfterDrop('Bağlantın çok uzun süre koptu, maç sona erdi. Yeni maç kurabilirsin.');
+  roomLost('Bağlantın çok uzun süre koptu, maç sona erdi.');
 });
 
 socket.on('matched', ({ opponentName, myName: serverName, maxRounds: mr }) => {

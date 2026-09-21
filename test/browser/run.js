@@ -35,11 +35,21 @@ function loadPlaywright() {
 
 async function resetDatabase() {
   const { Client } = require('pg');
+  // The production schema, applied here rather than waited for. It is
+  // idempotent, and creating it up front takes the cold-start cost out of the
+  // first test: on a genuinely empty database (CI) the server's own migration
+  // took long enough that a test registering an account immediately got
+  // 503 accounts_unavailable. The SQL lives in its own module precisely so that
+  // reading it here does not load db.js — which would cache a poolless module
+  // for the test that sets DATABASE_URL afterwards.
+  // eslint-disable-next-line global-require
+  const SCHEMA = require('../../server/schema');
   const client = new Client({
     connectionString: TEST_DB,
     ssl: /localhost|127\.0\.0\.1/.test(TEST_DB) ? false : { rejectUnauthorized: false },
   });
   await client.connect();
+  await client.query(SCHEMA);
   await client.query('TRUNCATE matches, sessions, players RESTART IDENTITY CASCADE')
     .catch(() => {}); // tables may not exist on the very first run
   await client.end();

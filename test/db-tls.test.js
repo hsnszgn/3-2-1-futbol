@@ -147,6 +147,43 @@ module.exports = async function run() {
     notes.push('yerel istisna yalnız ayrıştırılmış host ile: parola/parametre içindeki "localhost" TLS\'i kapatmıyor');
   }
 
+  // --- 1b. the policy's host must be the host pg actually dials -------------
+  // Reading URL.hostname is not enough: a `host=` query parameter overrides the
+  // authority, so a connection string could keep the local no-TLS exception
+  // while sending the driver to a remote server. Asserting the policy alone
+  // would never catch that — the driver's own resolution is the check.
+  {
+    const cases = [
+      'postgres://user:pw@localhost/app?host=db.example.com',
+      'postgres://user:pw@db.example.com/app?host=localhost',
+      'postgres://user:pw@db.example.com/app',
+      'postgres://user:pw@127.0.0.1:5433/app',
+      'postgres://user:pw@db.example.com/app?sslmode=disable&host=other.example.com',
+    ];
+    for (const raw of cases) {
+      const policy = db.sslConfigFor(raw, {});
+      const actual = new ConnectionParameters({
+        connectionString: policy.connectionString,
+        ssl: policy.ssl,
+      });
+      assert.strictEqual(String(actual.host).toLowerCase(), policy.host,
+        `the TLS decision was made for "${policy.host}" while pg connects to "${actual.host}"`);
+
+      const remote = !['localhost', '127.0.0.1', '::1'].includes(String(actual.host).toLowerCase());
+      if (remote) {
+        assert.ok(actual.ssl && actual.ssl.rejectUnauthorized === true,
+          `pg would reach the remote host "${actual.host}" with ssl=${JSON.stringify(actual.ssl)}`);
+      } else {
+        assert.strictEqual(actual.ssl, false,
+          `a local target asked for TLS it does not have: ${JSON.stringify(actual.ssl)}`);
+      }
+    }
+    const overridden = db.sslConfigFor('postgres://user:pw@localhost/app?host=db.example.com', {});
+    assert.strictEqual(overridden.hostOverridden, true,
+      'a host parameter that moves the target was not reported');
+    notes.push(`politika host'u sürücünün gerçek hedefiyle aynı (${cases.length} biçim); "?host=" ile uzağa taşınan bağlantı artık doğrulanıyor`);
+  }
+
   // --- 2. the connection string cannot weaken it ---------------------------
   {
     // First, the behaviour being defended against, measured in pg itself.

@@ -129,6 +129,35 @@ async function startTestServer(env = {}) {
   };
 }
 
+/**
+ * Waits until the server's account service is actually usable.
+ *
+ * /healthz answers as soon as the port is open, and the migration runs AFTER
+ * that. Against a database that already has the schema it finishes in
+ * milliseconds, so tests that registered an account straight away passed
+ * everywhere — until CI ran them on a genuinely empty database, where creating
+ * the schema takes long enough that the first register answered
+ * 503 accounts_unavailable. Readiness is a thing to wait for, not to assume.
+ */
+async function waitForAccounts(server, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let ready = false;
+    try {
+      const res = await fetch(`${server.url}/api/config`);
+      if (res.ok) ready = Boolean((await res.json()).accountsEnabled);
+    } catch (err) {
+      // not answering yet
+    }
+    if (ready) return;
+    if (!server.isAlive()) throw new Error('server exited before accounts became ready');
+    if (Date.now() > deadline) {
+      throw new Error(`accounts never became ready within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function waitForHttp(url, timeoutMs, hasExited) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -229,4 +258,4 @@ function silenceConsole() {
   return () => {};
 }
 
-module.exports = { startTestServer, connectClient, waitFor, waitForAll, waitForHttp, submit, silenceConsole };
+module.exports = { startTestServer, connectClient, waitFor, waitForAll, waitForHttp, waitForAccounts, submit, silenceConsole };
