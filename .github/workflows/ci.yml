@@ -17,6 +17,10 @@
 # it): run #3 on 3b69b67 is the first END-TO-END GREEN run — all four steps on
 # both Node versions (22.22.2 and 24.21.0).
 #
+# Then 877d3fc and 80cd09c were RED before any test ran: a comment placed inside
+# the postgres `options: >-` block below was passed to `docker create` as text.
+# See the note above `options:`; test/ci-workflow.test.js guards it.
+#
 # Before it: run #1 on bbcb58d and run #2 on cd658b5 both FAILED on GitHub Actions,
 # both times in the isolated-PostgreSQL steps and both times for the same
 # reason — on a genuinely cold database the server's migration finishes AFTER
@@ -49,11 +53,16 @@ jobs:
           POSTGRES_PASSWORD: testsifre
           POSTGRES_DB: testdb
         ports: ['5432:5432']
+        # -U postgres on purpose: the default probes as the runner's own user
+        # ("root"), which the container refuses, so every 5s of a 19-minute run
+        # landed a FATAL line in the service log.
+        #
+        # This comment sits ABOVE `options:` and must stay there. `>-` is a block
+        # scalar: a `#` line inside it is not a YAML comment but text, and it was
+        # passed straight to `docker create` — "invalid reference format", the
+        # container never started, and both jobs of 877d3fc and 80cd09c failed
+        # before checking out any code. test/ci-workflow.test.js now fails on it.
         options: >-
-          # -U postgres on purpose: the default probes as the runner's own user
-          # ("root"), which the container refuses, and every 5s of a 19-minute run
-          # lands a FATAL line in the service log. The probe still succeeded, so the
-          # jobs were green — the noise just made the log harder to read.
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 5s

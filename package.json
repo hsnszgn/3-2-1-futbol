@@ -15,7 +15,9 @@
     "dev": "node server/index.js",
     "build:squads": "node scripts/build-squads.js",
     "notices": "node scripts/third-party-notices.js",
-    "build:icons": "node scripts/build-icons.js"
+    "build:icons": "node scripts/build-icons.js",
+    "beta:report": "node scripts/beta-report.js",
+    "beta:integrity": "node scripts/check-match-integrity.js"
   },
   "dependencies": {
     "express": "^4.19.2",

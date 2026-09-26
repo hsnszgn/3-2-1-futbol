@@ -223,6 +223,37 @@ npm start
 
 Sunucu `http://localhost:3000` adresinde çalışır.
 
+## Beta ölçümü (varsayılan olarak kapalı)
+
+Beta kapısı için maçların gerçekten bitip bitmediğini, iki ekranın sonucu
+gösterip göstermediğini ve sonucun yazılması gereken yere yazılıp yazılmadığını
+kaydeden bir olay tablosu var (`telemetry_events`). **Kapalı gelir** ve
+`docs/VERI-ENVANTERI.md`'deki saklama işi uygulanmadan açılmamalıdır.
+
+| Değişken | Anlamı |
+|---|---|
+| `TELEMETRY_ENABLED=1` | Olayları yazmaya başlar. Yoksa hiçbir şey yazılmaz ve bellekte tutulmaz. |
+| `TELEMETRY_ENVIRONMENT` | `staging` / `beta` / `production` / `test`. Yoksa `staging`. |
+| `TELEMETRY_TRAFFIC_KIND` | `human_beta` / `automated` / `manual_qa`. Yoksa `automated` — yani ayar unutulursa trafik **insan sayılmaz**. İstemci bunu değiştiremez. |
+| `TELEMETRY_COHORT_ID` | Beta grubunun adı, raporda filtre. |
+| `RELEASE_SHA` | Çalışan sürüm (Render'da `RENDER_GIT_COMMIT` kendiliğinden okunur). |
+| `TELEMETRY_REQUIRE_DURABLE_START=1` | Maçın başlangıcı veritabanına yazılamazsa maç başlatılmaz, oyunculara söylenir. Yalnız ölçüm açıkken geçerli. |
+
+Raporlar salt okunurdur ve hiçbir şeyi düzeltmez. Bağlantı adresi komut satırından
+**alınmaz**; `REPORT_DATABASE_URL` (yoksa `DATABASE_URL`) ortam değişkeninden okunur,
+tercihen salt okunur bir veritabanı kullanıcısıyla:
+
+```bash
+# H/C/V/P/F/U sayıları, iki tamamlanma oranı, durum (PASS/FAIL/INSUFFICIENT_DATA/OBSERVABILITY_GAP)
+npm run beta:report -- --from 2026-10-01T00:00:00Z --to 2026-10-08T00:00:00Z --cohort beta-01 --format markdown
+# olaylar ile matches tablosunun iki yönlü uzlaştırması
+npm run beta:integrity -- --cohort beta-01
+```
+
+Tarihler örnektir. PASS dışındaki her sonuç sıfır dışı çıkış koduyla biter.
+Raporun neyi kanıtlamadığı kendi çıktısında yazılıdır (aynı yanlış skorun iki yere
+yazılması, "gerçek insan" tespiti, `P` sınıfının yaklaşıklığı).
+
 ## Mimari
 - `server/index.js` — Express + Socket.io: eşleştirme (rastgele kuyruk / oda kodu), round state machine, zamanlayıcılar, bağlantı kopması toleransı.
 - `server/wikidata.js` — Futbolcu doğrulaması için Wikidata'nın ücretsiz, API-key gerektirmeyen arama + SPARQL servislerine canlı bağlanır. Sorgu, takımlar açıklanır açıklanmaz (oyuncular henüz yazmaya başlamadan) arka planda tetiklenir, böylece tahmin anında gecikme hissedilmez. Burada Wikidata'ya özgü iki tuzak var ve ikisi de üretimde canımızı yaktı:

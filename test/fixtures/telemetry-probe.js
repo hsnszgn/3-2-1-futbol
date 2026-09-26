@@ -24,7 +24,7 @@ async function main() {
   const telemetry = require('../../server/telemetry');
 
   // The queue only drains once the schema is in place, exactly as in the server.
-  if (scenario !== 'write-failure' && scenario !== 'overflow') {
+  if (!['write-failure', 'overflow', 'bad-input', 'disabled'].includes(scenario)) {
     await db.migrate();
   }
 
@@ -38,6 +38,82 @@ async function main() {
     telemetry.record('game_started', { eventId: id, gameId, seat: 'A', details: { mode: 'duel', max_rounds: 5 } });
     const flushed = await telemetry.flush(5000);
     out({ flushed, health: telemetry.health() });
+  } else if (scenario === 'idempotent-round') {
+    // The audit's case, verbatim: a round_scored with five detail keys, stored,
+    // then delivered again unchanged. JSONB does not keep key order, so comparing
+    // the stored object with JSON.stringify called this identical redelivery a
+    // contradiction and degraded the whole process.
+    const event = {
+      eventId: 'same-round-event',
+      gameId,
+      attemptId: 1,
+      seat: 'A',
+      details: { round: 1, points: 3, scored_seat: 'A', elapsed_ms: 412, outcome: 'correct' },
+    };
+    telemetry.record('round_scored', event);
+    await telemetry.flush(5000);
+    telemetry.record('round_scored', event);
+    await telemetry.flush(5000);
+    // And the positive direction: the SAME id with a genuinely different score
+    // must still be a contradiction. Fixing the false alarm by switching the
+    // check off would pass the first half and fail this one.
+    const changed = { ...event, gameId: `${gameId}-changed`, eventId: 'same-round-event-2' };
+    telemetry.record('round_scored', changed);
+    await telemetry.flush(5000);
+    const beforeChange = telemetry.health().degraded;
+    telemetry.record('round_scored', { ...changed, details: { ...changed.details, points: 1 } });
+    const flushed = await telemetry.flush(5000);
+    out({ flushed, beforeChange, health: telemetry.health() });
+  } else if (scenario === 'disabled') {
+    // Measurement switched off: a valid event is neither stored nor queued, and
+    // that is not a fault; an invalid one is still refused and counted.
+    const valid = telemetry.record('game_started', { gameId, details: { mode: 'duel' } });
+    const invalid = telemetry.record('toString', {});
+    const durable = await telemetry.recordDurable('game_started', { gameId });
+    out({ valid, invalid, durable, health: telemetry.health() });
+  } else if (scenario === 'bad-input') {
+    // The audit's three calls, and the rest of the ways a caller can be wrong.
+    // The contract is that record() never throws into the game and
+    // recordDurable() resolves to false rather than rejecting.
+    const cases = [
+      ['null fields', 'game_started', null],
+      ['null details', 'round_scored', { details: null }],
+      ['inherited key toString', 'toString', {}],
+      ['inherited key constructor', 'constructor', {}],
+      ['__proto__', '__proto__', {}],
+      ['fields is a string', 'round_scored', 'a string'],
+      ['details is an array', 'round_scored', { details: [1, 2] }],
+      ['BigInt detail', 'round_scored', { details: { points: 10n } }],
+      ['NaN detail', 'round_scored', { details: { points: NaN } }],
+      ['Symbol detail', 'round_scored', { details: { points: Symbol('x') } }],
+      ['function detail', 'round_scored', { details: { points: () => 1 } }],
+      ['object detail', 'round_scored', { details: { points: { n: 1 } } }],
+      ['fractional attempt', 'round_scored', { attemptId: 1.5 }],
+      ['invalid date', 'round_scored', { occurredAt: new Date('nope') }],
+      ['object game id', 'round_scored', { gameId: { toString() { return 'x'; } } }],
+      ['no type', undefined, undefined],
+    ];
+    const results = [];
+    for (const [label, type, fields] of cases) {
+      let threw = null;
+      let accepted = null;
+      try {
+        accepted = Boolean(telemetry.record(type, fields));
+      } catch (err) {
+        threw = err.message;
+      }
+      results.push({ label, threw, accepted });
+    }
+    const durable = [];
+    for (const [label, type, fields] of [['null details', 'round_scored', { details: null }],
+      ['toString', 'toString', {}], ['BigInt', 'round_scored', { details: { points: 10n } }]]) {
+      try {
+        durable.push({ label, value: await telemetry.recordDurable(type, fields) });
+      } catch (err) {
+        durable.push({ label, rejected: err.message });
+      }
+    }
+    out({ results, durable, health: telemetry.health() });
   } else if (scenario === 'conflict') {
     // The same id carrying something else. This is a contradiction, not a
     // retry, and it must be reported rather than dropped.

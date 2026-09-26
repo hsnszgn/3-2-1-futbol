@@ -184,37 +184,94 @@ module.exports = async function run() {
     notes.push(`politika host'u sürücünün gerçek hedefiyle aynı (${cases.length} biçim); "?host=" ile uzağa taşınan bağlantı artık doğrulanıyor`);
   }
 
-  // --- 1c. two hosts in one URL must be refused, not guessed ---------------
-  // A repeated `host=` parameter is the gap 1b leaves open: the policy reads one
-  // value while the driver dials another. `URLSearchParams.get()` returns the
-  // FIRST occurrence and pg keeps the LAST, so a URL naming localhost first and
-  // a remote host second would have been treated as local — no TLS — while the
-  // driver connected to the remote server. There is no safe way to pick one, so
-  // the connection string is refused and accounts stay disabled.
+  // --- 1c. one clear acceptance rule for the target ----------------------
+  // Three times a hand-read URL disagreed with pg: a host parameter over the
+  // authority, a repeated host, and an empty LAST host. Each time it was the same
+  // failure — policy "local, no TLS", driver dialling a remote server in
+  // plaintext. The rule now: the host in the authority, optionally replaced by
+  // ONE non-empty host parameter; anything else is refused. And whatever is
+  // accepted is checked against the driver's own parse.
   {
-    // The divergence, measured rather than assumed. If pg ever starts keeping
-    // the first value this control fails and the reasoning above is out of date.
+    // The divergences, measured in the real libraries rather than assumed. If
+    // either library changes, these controls fail and the reasoning is stale.
     const both = 'postgres://user:pw@ignored.example.com/app?host=localhost&host=db.example.com';
     assert.strictEqual(new URL(both).searchParams.get('host'), 'localhost',
       'URLSearchParams no longer returns the first value — this test is out of date');
     assert.strictEqual(String(new ConnectionParameters({ connectionString: both }).host), 'db.example.com',
       'pg no longer keeps the last host — this test is out of date');
+    const emptyLast = 'postgres://u:dummy@db.example.com/app?host=localhost&host=';
+    assert.strictEqual(String(new ConnectionParameters({ connectionString: emptyLast }).host), 'db.example.com',
+      'pg no longer falls back to the authority on an empty last host — this test is out of date');
 
-    // Both orders, so the refusal is not an accident of which one happens to be
-    // local: whichever value a reader takes, the other one is a different server.
-    for (const raw of [both, 'postgres://user:pw@ignored.example.com/app?host=db.example.com&host=localhost']) {
-      assert.throws(() => db.sslConfigFor(raw, {}), /more than one host/i,
-        `a URL naming two hosts was accepted: ${raw}`);
+    const refused = [
+      // two different hosts, both orders
+      both,
+      'postgres://user:pw@ignored.example.com/app?host=db.example.com&host=localhost',
+      // the audit's case: an empty LAST value, which filter(Boolean) used to
+      // erase before counting
+      emptyLast,
+      // and the reverse
+      'postgres://u:dummy@db.example.com/app?host=&host=localhost',
+      // a single empty host, local and remote authority
+      'postgres://u:dummy@localhost/app?host=',
+      'postgres://u:dummy@db.example.com/app?host=%20',
+      // the same host twice is still two parameters
+      'postgres://u:dummy@db.example.com/app?host=db.example.com&host=db.example.com',
+      // no host at all: pg would fall back to PGHOST or "localhost"
+      'postgres:///app',
+      // unreadable: its target cannot be checked
+      'not a url',
+    ];
+    for (const raw of refused) {
+      assert.throws(() => db.sslConfigFor(raw, {}), /refusing/i,
+        `an ambiguous target was accepted: ${raw}`);
     }
 
-    // And the refusal must be about ambiguity, not about the parameter existing:
-    // one host, even repeated with the same value, still resolves.
-    const single = db.sslConfigFor('postgres://user:pw@ignored.example.com/app?host=db.example.com&host=db.example.com', {});
-    assert.strictEqual(single.host, 'db.example.com', 'a single repeated host was not resolved');
-    assert.ok(single.ssl && single.ssl.rejectUnauthorized === true,
-      'a remote single host lost its verification');
-    notes.push('aynı URL\'de iki farklı "host=" değeri reddediliyor (her iki sırada); '
-      + 'ölçüm: URLSearchParams ilkini, pg sonuncusunu alıyor · tek host (tekrar etse de) çalışıyor');
+    // Accepted forms still work, and in every one of them policy and driver agree
+    // on host and on TLS.
+    const accepted = [
+      ['postgres://u:dummy@db.example.com/app', 'db.example.com', true],
+      ['postgres://u:dummy@localhost/app?host=db.example.com', 'db.example.com', true],
+      ['postgres://u:dummy@db.example.com/app?host=localhost', 'localhost', false],
+      ['postgres://u:dummy@127.0.0.1:5433/postgres', '127.0.0.1', false],
+      ['postgres://u:dummy@[::1]:5432/app', '[::1]', false],
+    ];
+    for (const [raw, host, verified] of accepted) {
+      const cfg = db.sslConfigFor(raw, {});
+      const actual = new ConnectionParameters({ connectionString: cfg.connectionString, ssl: cfg.ssl });
+      assert.strictEqual(cfg.host, host, `${raw}: policy host ${cfg.host}`);
+      assert.strictEqual(String(actual.host).toLowerCase(), host, `${raw}: driver host ${actual.host}`);
+      assert.strictEqual(cfg.verified, verified, `${raw}: verified=${cfg.verified}`);
+      assert.strictEqual(Boolean(actual.ssl && actual.ssl.rejectUnauthorized === true), verified,
+        `${raw}: the driver would use ssl=${JSON.stringify(actual.ssl)}`);
+    }
+
+    // The driver-agreement check on its own. Every ambiguous spelling above is
+    // refused by the explicit rule before this check runs, so it gets its own
+    // cases: configs that DISAGREE with what pg would do, handed straight in.
+    // This is the layer that still holds for a spelling nobody has found yet.
+    assert.throws(() => db._assertDriverAgrees({
+      // the audit's string, with the decision the old code made for it
+      connectionString: emptyLast, ssl: false, host: 'localhost', verified: false,
+    }), /driver would connect to "db\.example\.com"/,
+    'a TLS decision for a host the driver will not dial was accepted');
+    assert.throws(() => db._assertDriverAgrees({
+      connectionString: 'postgres://u:dummy@db.example.com/app',
+      ssl: false, host: 'db.example.com', verified: true,
+    }), /would not apply the TLS setting/,
+    'a config claiming verification while handing the driver ssl=false was accepted');
+    db._assertDriverAgrees(db.sslConfigFor('postgres://u:dummy@db.example.com/app', {}));
+
+    // An IPv6 literal must not be sent as an SNI name (RFC 6066): URL.hostname
+    // keeps the brackets, and net.isIP() did not recognise the bracketed form.
+    const v6 = db.sslConfigFor('postgres://u:dummy@[2001:db8::1]:5432/app', {});
+    assert.strictEqual(v6.ssl.servername, undefined,
+      `an IPv6 address was sent as an SNI name: ${v6.ssl.servername}`);
+
+    notes.push(`hedef için tek kabul kuralı: ${refused.length} muğlak biçim reddedildi (iki farklı host, `
+      + 'boş son/ilk host, tek boş host, aynı host iki kez, host yok, okunamayan adres); '
+      + `${accepted.length} kabul edilen biçimde politika ve sürücü aynı host ve aynı TLS'te; `
+      + 'ölçüm: URLSearchParams ilk, pg son değeri alıyor ve boş son değerde authority\'ye dönüyor');
   }
 
   // --- 2. the connection string cannot weaken it ---------------------------

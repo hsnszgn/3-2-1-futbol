@@ -11,6 +11,7 @@ const { getCommonPlayers, resolveTeamByName, prefetchSquad } = require('./wikida
 const squadStore = require('./squadStore');
 const db = require('./db');
 const accounts = require('./accounts');
+const telemetry = require('./telemetry');
 const { createLimiter } = require('./rateLimit');
 const brand = require('../config/brand');
 
@@ -733,8 +734,76 @@ function createRoom(socketA, socketB) {
   }
 
   sendHeadToHead(room);
-  startRound(room);
+  beginGame(room, {});
   return true;
+}
+
+/**
+ * Starts the first round, recording that the game began.
+ *
+ * The recording comes first for one reason (M3): a game whose start was never
+ * stored is invisible to the report, and a crash would then remove it from the
+ * denominator instead of showing it as unfinished. With the gate on, the rounds
+ * wait for that write; with it off — the default — the event is queued like any
+ * other and the game starts immediately.
+ */
+function beginGame(room, details) {
+  const roomId = room.id;
+  const fields = { gameId: room.gameId, details: { mode: 'duel', max_rounds: MAX_ROUNDS, ...details } };
+  if (!requireDurableStart()) {
+    telemetry.record('game_started', fields);
+    startRound(room);
+    return;
+  }
+  room.state = 'awaiting-measurement';
+  telemetry.recordDurable('game_started', fields).then((stored) => {
+    // The room may be gone, or on a different game, by the time this resolves.
+    if (rooms.get(roomId) !== room || room.gameId !== fields.gameId) return;
+    if (stored) {
+      startRound(room);
+      return;
+    }
+    // Refusing is the point: an unmeasurable beta game would be played and then
+    // counted as nothing. The players are told plainly instead of being left on
+    // a screen that never starts.
+    telemetry.record('game_aborted', { gameId: room.gameId, reasonCode: 'server_error' });
+    clearTimer(room);
+    io.to(roomId).emit('roomGone', { reason: 'measurement_unavailable' });
+    rooms.delete(roomId);
+    for (const seat of room.players) {
+      const socket = io.of('/').sockets.get(seat.socketId);
+      if (socket) socket.data.roomId = null;
+    }
+  });
+}
+
+/**
+ * Which SIDE of the board an event belongs to: 'A' is room.players[0].
+ *
+ * Seats, not people. The measurement never stores who played — no username, no
+ * account id — so a seat is the most it may say about a player.
+ */
+function seatOf(room, socketId) {
+  const index = room.players.findIndex((p) => p.socketId === socketId);
+  return index === 0 ? 'A' : index === 1 ? 'B' : null;
+}
+
+/**
+ * Should a game refuse to start until its start event is durably stored?
+ *
+ * Off by default, and deliberately so: this is a beta-measurement gate, and a
+ * deployment that is not being measured must not gain a new way to fail. With it
+ * on (M3), a crash cannot leave the finished games remembered and the unfinished
+ * ones missing — which would raise the completion ratio by losing its
+ * denominator.
+ */
+//
+// Only meaningful with measurement switched on: the gate without the events would
+// refuse every game for want of a write that was never going to happen.
+const requireDurableStart = () => process.env.TELEMETRY_REQUIRE_DURABLE_START === '1'
+  && process.env.TELEMETRY_ENABLED === '1';
+if (process.env.TELEMETRY_REQUIRE_DURABLE_START === '1' && process.env.TELEMETRY_ENABLED !== '1') {
+  console.error('TELEMETRY_REQUIRE_DURABLE_START is set but TELEMETRY_ENABLED is not; the gate is ignored');
 }
 
 const accountIdOf = (socket) => (socket.data.account ? socket.data.account.id : null);
@@ -894,6 +963,13 @@ function onThisAttempt(room, fn, delayMs) {
  * The attempt is retired here, the moment it is announced.
  */
 function voidRound(room, reason, next) {
+  // Recorded as its own kind of event, not as a round scored zero: a replayed
+  // round must not inflate the round count, and "nobody could answer" is not the
+  // same evidence as "nobody did".
+  telemetry.record('round_voided', {
+    gameId: room.gameId, attemptId: room.attempt, reasonCode: reason,
+    details: { round: room.round },
+  });
   io.to(room.id).emit('roundVoid', { reason });
   room.state = 'void';
   room.attempt += 1;
@@ -1011,6 +1087,21 @@ function endGame(room) {
   io.to(room.id).emit('gameOver', {
     scores: scoresForClient(room),
     winnerSocketId,
+    // Echoed back by the client once the result screen is drawn, so the
+    // server can tell WHICH game a screen confirmed. It is the same random id
+    // the result row is stored under; nothing accepts it as a credential.
+    gameId: room.gameId,
+  });
+
+  // The server's own account of the result, with the scores frozen above. It is
+  // NOT evidence that either screen showed it, and not evidence that the row was
+  // written — those are separate events, on purpose.
+  telemetry.record('game_finished', {
+    gameId: room.gameId,
+    details: {
+      score_a: scoreA, score_b: scoreB, rounds_played: room.round,
+      winner_seat: winnerSocketId ? seatOf(room, winnerSocketId) : 'draw',
+    },
   });
 
   // The id of the game that just ended, read HERE and passed on.
@@ -1041,7 +1132,22 @@ async function saveMatch(room, { scoreA, scoreB, winnerSocketId, gameId }) {
   // The account ids, by contrast, are read AFTER the wait on purpose: the whole
   // point of waiting is that the answer may be "this player is signed out", and
   // then their seat has been cleared and nothing is recorded.
-  if (!db.isReady() || !a.accountId || !b.accountId) return;
+  // Why a result is or is not written down, recorded as a decision rather than
+  // left to be guessed from the absence of a row. A guest game has nowhere to be
+  // stored and that is correct behaviour, not a missing record — the report has
+  // to be able to tell those apart.
+  if (!db.isReady() || !a.accountId || !b.accountId) {
+    telemetry.record('recording_decided', {
+      gameId,
+      reasonCode: !db.isReady() ? 'accounts_unavailable'
+        : (a.accountId || b.accountId) ? 'session_revoked' : 'guest_seat',
+      details: { decision: 'skip', policy: 'both_signed_in' },
+    });
+    return;
+  }
+  telemetry.record('recording_decided', {
+    gameId, reasonCode: 'both_signed_in', details: { decision: 'persist', policy: 'both_signed_in' },
+  });
   const winnerId = winnerSocketId === a.socketId ? a.accountId
     : winnerSocketId === b.socketId ? b.accountId
     : null;
@@ -1055,8 +1161,14 @@ async function saveMatch(room, { scoreA, scoreB, winnerSocketId, gameId }) {
       scoreB,
       winnerId,
     });
+    // The transaction returned, so the row is there. This is the only event that
+    // may be read as "the result is persisted".
+    telemetry.record('match_persisted', { gameId, details: { match_uid: gameId } });
     await sendStatsUpdate(room);
   } catch (err) {
+    telemetry.record('match_persist_failed', {
+      gameId, details: { match_uid: gameId, error_kind: err.code || 'unknown' },
+    });
     console.error('could not record match:', err.message);
   }
 }
@@ -1198,6 +1310,24 @@ io.on('connection', (socket) => {
         room.cleanupTimer = null;
       }
       socket.join(room.id);
+      // Recovered: same socket, same seat, and the room is still there. Note
+      // that "the socket connected" alone is NOT this event — a new connection
+      // that lost its session is the window_expired case above.
+      telemetry.record('recovery_finished', {
+        gameId: room.gameId,
+        attemptId: room.attempt,
+        seat: seatOf(room, socket.id),
+        reasonCode: 'recovered',
+        details: {
+          episode_id: socket.data.telemetryEpisode || undefined,
+          outcome: 'recovered',
+          phase: room.state,
+          round: room.round,
+          away_ms: socket.data.telemetryAwaySince ? Date.now() - socket.data.telemetryAwaySince : undefined,
+        },
+      });
+      socket.data.telemetryEpisode = null;
+      socket.data.telemetryAwaySince = null;
       socket.to(room.id).emit('opponentReconnected');
       // The replayed events this socket is about to receive describe the room
       // as it was when it dropped. Tell it what is true now.
@@ -1214,6 +1344,16 @@ io.on('connection', (socket) => {
       // test/browser/recovery-roomgone.spec.js). It stays because that replay is
       // the adapter's behaviour rather than something this server states, and
       // the cost of being explicit is one event.
+      telemetry.record('recovery_finished', {
+        reasonCode: 'room_gone',
+        details: {
+          episode_id: socket.data.telemetryEpisode || undefined,
+          outcome: 'room_gone',
+          away_ms: socket.data.telemetryAwaySince ? Date.now() - socket.data.telemetryAwaySince : undefined,
+        },
+      });
+      socket.data.telemetryEpisode = null;
+      socket.data.telemetryAwaySince = null;
       socket.data.roomId = null;
       socket.emit('roomGone', { reason: 'disconnected_too_long' });
     }
@@ -1528,6 +1668,20 @@ io.on('connection', (socket) => {
     const points = pointsForSpeed(elapsedMs);
     room.scores[socket.id] = (room.scores[socket.id] || 0) + points;
 
+    // Fire-and-forget, and stamped with the attempt that was actually scored:
+    // the elapsed time here is the one the points were computed from, not a
+    // fresh reading. No await is added to this path — the two worst bugs in this
+    // file came from a value read after one.
+    telemetry.record('round_scored', {
+      gameId: room.gameId,
+      attemptId: attempt,
+      seat: seatOf(room, socket.id),
+      details: {
+        round: room.round, points, elapsed_ms: elapsedMs,
+        scored_seat: seatOf(room, socket.id), outcome: 'answered',
+      },
+    });
+
     io.to(room.id).emit('roundResult', {
       winnerSocketId: socket.id,
       playerName: matched,
@@ -1554,18 +1708,46 @@ io.on('connection', (socket) => {
 
     if (ids.every((id) => room.rematchRequests.has(id))) {
       room.rematchRequests.clear();
+      const previousGameId = room.gameId;
       room.round = 0;
       // A new game, so a new id — otherwise the rematch's result would collide
       // with the first game's row and be silently dropped.
       room.gameId = randomUUID();
       for (const id of ids) room.scores[id] = 0;
       io.to(room.id).emit('rematchStarting');
-      startRound(room);
+      // A rematch is a NEW game, counted separately, and it says which game it
+      // followed so the report can tell a series from a double-counted result.
+      beginGame(room, { rematch_of: previousGameId });
       return;
     }
 
     socket.emit('rematchWaiting');
     socket.to(room.id).emit('opponentWantsRematch');
+  });
+
+  // "My screen now shows the result of this game." Measurement evidence only
+  // (M2): it grants nothing, changes no score and is never trusted as the
+  // server's own account. It is accepted only from a socket SEATED in the room,
+  // only for the game that room has just finished, and only once per seat — a
+  // replayed or late notice (a rematch has already started) is dropped, which
+  // leaves that game unconfirmed rather than confirming the wrong one.
+  onSocketEvent(socket, 'resultRendered', ({ gameId }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.state !== 'game-over') return;
+    if (typeof gameId !== 'string' || gameId !== room.gameId) return;
+    const seat = seatOf(room, socket.id);
+    if (!seat) return;
+    if (!room.renderedSeats || room.renderedSeats.gameId !== room.gameId) {
+      room.renderedSeats = { gameId: room.gameId, seats: new Set() };
+    }
+    if (room.renderedSeats.seats.has(seat)) return;
+    room.renderedSeats.seats.add(seat);
+    telemetry.record('result_rendered', {
+      gameId: room.gameId,
+      seat,
+      source: 'client',
+      details: { round: room.round, rounds_played: room.round },
+    });
   });
 
   onSocketEvent(socket, 'leaveRoom', () => cleanupSocket(socket));
@@ -1586,6 +1768,19 @@ io.on('connection', (socket) => {
     // back constantly (keyboard focus, backgrounding, brief network blips).
     // Give connection state recovery a window to bring the same socket back
     // into this room before we tell the opponent they left for good.
+    // One id per drop, so that the retries Socket.IO makes inside a single
+    // disconnection cannot be counted as several disconnections — and so the
+    // outcome below can be tied back to THIS drop.
+    const episodeId = telemetry.record('disconnect_observed', {
+      gameId: room.gameId,
+      attemptId: room.attempt,
+      seat: seatOf(room, socket.id),
+      reasonCode: 'unknown',
+      details: { phase: room.state, round: room.round },
+    });
+    socket.data.telemetryEpisode = episodeId;
+    socket.data.telemetryAwaySince = Date.now();
+
     socket.to(roomId).emit('opponentDisconnectedTemporarily');
     if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
     room.cleanupTimer = setTimeout(() => {
@@ -1593,6 +1788,23 @@ io.on('connection', (socket) => {
       const current = rooms.get(roomId);
       if (!current) return;
       clearTimer(current);
+      // The window ran out. Two separate facts: this drop never recovered, and
+      // the game ended without a result.
+      telemetry.record('recovery_finished', {
+        gameId: current.gameId,
+        attemptId: current.attempt,
+        seat: seatOf(current, socket.id),
+        reasonCode: 'window_expired',
+        details: {
+          episode_id: episodeId, outcome: 'window_expired', phase: current.state,
+          round: current.round, away_ms: RECONNECT_GRACE_MS,
+        },
+      });
+      telemetry.record('game_aborted', {
+        gameId: current.gameId,
+        reasonCode: 'recovery_expired',
+        details: { round: current.round, rounds_played: current.round },
+      });
       io.to(roomId).emit('opponentLeft', { disconnected: true });
       rooms.delete(roomId);
     }, RECONNECT_GRACE_MS);
@@ -1613,6 +1825,17 @@ function cleanupSocket(socket, disconnected = false) {
   if (!room) return;
   if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
   clearTimer(room);
+  // A game that was being played and now is not. An explicit leave is the only
+  // thing the report may treat as a deliberate abandonment (V); a disconnection
+  // reaching here is not, and carries its own reason.
+  if (room.state !== 'game-over') {
+    telemetry.record('game_aborted', {
+      gameId: room.gameId,
+      seat: seatOf(room, socket.id),
+      reasonCode: disconnected ? 'opponent_left' : 'left',
+      details: { round: room.round, rounds_played: room.round },
+    });
+  }
   socket.to(roomId).emit('opponentLeft', { disconnected });
   rooms.delete(roomId);
   socket.data.roomId = null;
@@ -1628,7 +1851,15 @@ function shutdown(signal) {
   io.emit('serverRestarting');
   io.close();
   server.close(() => {
-    db.close().finally(() => process.exit(0));
+    // A bounded flush, not a promise of no loss: whatever is still queued when
+    // the deadline passes is gone, and the report finds those games by their
+    // missing final event rather than assuming they finished.
+    telemetry.record('process_stopping', { details: { signal, pending_events: telemetry.health().queued } });
+    telemetry.flush(3000)
+      .then((result) => {
+        if (!result.flushed) console.error(`telemetry: ${result.remaining} event(s) lost on shutdown`);
+      })
+      .finally(() => db.close().finally(() => process.exit(0)));
   });
   // Don't hang forever on a socket that refuses to close.
   setTimeout(() => process.exit(0), 10000).unref();
@@ -1669,6 +1900,10 @@ server.listen(PORT, () => {
     db.migrate().then((ready) => {
       if (ready) {
         startPurgeLoop();
+        // Recorded only now: before the schema exists there is nowhere to put
+        // it, and a queued event would just sit there. A report tells "no final
+        // event because the process died" from "still being played" by this id.
+        telemetry.record('process_started', { details: { node_version: process.version } });
         return;
       }
       if (!db.isEnabled()) return; // no database configured; nothing to retry

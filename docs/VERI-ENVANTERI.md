@@ -7,7 +7,7 @@ metni bunun üzerine yazılmalıdır — tahmin üzerine değil.
 Kod değiştiğinde bu belge de güncellenmelidir. Doğrulama noktaları her satırda
 dosya adıyla verilmiştir.
 
-Son kontrol: 2026-09-18
+Son kontrol: 2026-09-26
 
 ---
 
@@ -48,6 +48,37 @@ Oturum satırında **IP, cihaz, tarayıcı veya konum bilgisi tutulmuyor.**
 
 Yalnızca **iki tarafı da kayıtlı** maçlar yazılır; misafir içeren maçlar hiç
 kaydedilmez (`server/index.js`, `saveMatch`).
+
+### `telemetry_events` — beta ölçüm olayları (**tanımlı, varsayılan olarak KAPALI**)
+
+Şema `server/schema.js`, yazan kod `server/telemetry.js`. Tablo migration ile
+oluşur ama **`TELEMETRY_ENABLED=1` ayarlanmadıkça hiçbir satır yazılmaz ve
+bellekte de tutulmaz** — bu, testle doğrulanıyor (`test/telemetry-game.test.js`,
+bölüm 7: kapalıyken tam bir maç 0 satır yazdı). Aşağıdaki saklama işi
+uygulanmadan **açılmamalıdır**.
+
+| Alan | İçerik | Kişisel veri mi |
+|---|---|---|
+| `event_id`, `schema_version`, `event_type` | rastgele kimlik, sürüm, olay türü | hayır |
+| `game_id`, `attempt_id` | rastgele maç kimliği (kayıtlı maçta `matches.match_uid` ile aynı), tur denemesi | dolaylı — kayıtlı maçta hesaplara bağlanabilir |
+| `seat` | `A` / `B` — masanın hangi tarafı | hayır (kişi değil, taraf) |
+| `server_occurred_at`, `stored_at` | sunucu zamanı | dolaylı |
+| `environment`, `traffic_kind`, `beta_cohort_id`, `release_sha`, `process_instance_id` | sunucu yapılandırması | hayır |
+| `source`, `reason_code` | `server`/`client`, sözlükteki sebep kodu | hayır |
+| `details` | olay türüne göre **izin listesindeki** skaler alanlar: tur, puan, süre (ms), skorlar, kazanan taraf, faz, kopma bölüm kimliği vb. | hayır |
+
+**Yazılmayanlar (izin listesiyle zorlanıyor, test ediliyor):** kullanıcı adı,
+görünen ad, hesap kimliği, IP, cihaz/tarayıcı bilgisi, oturum jetonu, parola,
+Authorization başlığı, bağlantı adresi, oyuncunun yazdığı cevap, seçtiği takım
+(`test/telemetry.test.js` bölüm 4, `test/telemetry-game.test.js` bölüm 1).
+
+**Dürüst sınır:** takma ad bile tutulmaması veriyi kendiliğinden anonim yapmaz.
+Kayıtlı iki oyuncunun maçında `game_id`, `matches.match_uid` ile aynıdır; yani
+`matches` tablosuna erişimi olan biri olayı iki hesaba bağlayabilir.
+
+**Saklama (henüz UYGULANMADI):** yol haritası ham olaylar için 30 gün, toplu
+raporlar için 90 gün öneriyor. Bunu silen bir iş **depoda yok**; açma kararı
+bundan ve bu belgenin gözden geçirilmesinden sonra verilmelidir.
 
 ---
 
@@ -122,6 +153,7 @@ sağlayıcısının politikasına tabidir.
 | Oda/oyun durumu | maç süresince |
 | Davet kodu | 30 dakika |
 | Hız sınırı sayaçları | en fazla 1 saat |
+| Ölçüm olayları (`telemetry_events`) | **toplanmıyor** (varsayılan kapalı); açılırsa önerilen 30 gün — silme işi henüz yok |
 
 **Hesap silindiğinde:** kullanıcı adı ve görünen ad anonimleştirilir, şifre
 özeti tamamen silinir, tüm oturumlar yok edilir. Maç satırları kalır — çünkü

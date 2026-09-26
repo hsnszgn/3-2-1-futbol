@@ -68,6 +68,7 @@ module.exports = async function run({ databaseUrl }) {
   const db = await openDb(databaseUrl);
   const base = {
     DATABASE_URL: databaseUrl,
+    TELEMETRY_ENABLED: '1',
     TELEMETRY_ENVIRONMENT: 'beta',
     TELEMETRY_TRAFFIC_KIND: 'human_beta',
     TELEMETRY_COHORT_ID: 'beta-test',
@@ -105,6 +106,36 @@ module.exports = async function run({ databaseUrl }) {
       assert.strictEqual(result.health.degraded, null,
         `an identical redelivery degraded the process: ${result.health.degraded}`);
       notes.push('aynı olay iki kez teslim edildi: tek satır, çelişki üretilmedi, süreç sağlam');
+    }
+
+    // --- 1b. ...including one whose details jsonb stores in another order -----
+    // Found by review: the first version compared JSON.stringify of the stored
+    // row with the new one, and jsonb does not keep key order. An IDENTICAL
+    // round_scored redelivery was reported as a contradiction and degraded the
+    // process. The game_started case above has only two keys and never showed it.
+    {
+      const gameId = 'g-round-redelivery';
+      const result = await runProbe('idempotent-round', { ...base, PROBE_GAME_ID: gameId });
+      const rows = await rowsFor(gameId);
+      assert.deepStrictEqual(rows.map((r) => r.event_type), ['round_scored'],
+        `an identical round_scored redelivery produced ${JSON.stringify(rows.map((r) => r.event_type))}`);
+      // Say out loud that this case really exercises reordering; if jsonb ever
+      // started preserving order this test would no longer prove anything.
+      const storedKeys = Object.keys(rows[0].details);
+      assert.notDeepStrictEqual(storedKeys, ['round', 'points', 'scored_seat', 'elapsed_ms', 'outcome'],
+        'jsonb returned the keys in insertion order, so this case no longer tests reordering');
+      assert.strictEqual(result.beforeChange, null,
+        `an identical redelivery degraded the process: ${result.beforeChange}`);
+      // The positive direction, in the same run: the same id with a different
+      // score IS a contradiction and must still be reported.
+      const changed = await rowsFor(`${gameId}-changed`);
+      assert.deepStrictEqual(changed.map((r) => r.event_type).sort(), ['round_scored', 'telemetry_conflict'],
+        'a genuinely different score under the same id was not reported');
+      assert.strictEqual(changed.find((r) => r.event_type === 'round_scored').details.points, 3,
+        'the first stored score was rewritten');
+      assert.strictEqual(result.health.degraded, 'event_id_conflict');
+      notes.push(`aynı round_scored iki kez (jsonb anahtarları ${storedKeys.join('/')} sırasıyla döndü): `
+        + 'tek satır, çelişki yok, süreç sağlam · aynı kimlikle farklı puan: çelişki yazıldı');
     }
 
     // --- 2. the same id with different content is reported ------------------

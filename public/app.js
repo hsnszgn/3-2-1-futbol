@@ -327,9 +327,14 @@ socket.on('disconnect', (reason) => {
 // Recovery worked, but the room was torn down while we were away — the server
 // says so explicitly, because the opponentLeft that ended the game could not
 // reach a socket that was not in the room at the time.
-socket.on('roomGone', () => {
+socket.on('roomGone', ({ reason } = {}) => {
   droppedInMatch = false;
-  roomLost('Bağlantın çok uzun süre koptu, maç sona erdi.');
+  // The default is still the disconnection case, which is what this event has
+  // always meant. A server that refuses to start a game it cannot measure needs
+  // to say something else — "your connection dropped" would be a lie.
+  roomLost(reason === 'measurement_unavailable'
+    ? 'Sunucu şu an maç kaydı tutamıyor, bu yüzden maç başlatılmadı. Birazdan tekrar dene.'
+    : 'Bağlantın çok uzun süre koptu, maç sona erdi.');
 });
 
 socket.on('matched', ({ opponentName, myName: serverName, maxRounds: mr }) => {
@@ -841,7 +846,7 @@ function updateScores(scores) {
   oppScoreEl.textContent = oppId ? scores[oppId] ?? 0 : 0;
 }
 
-socket.on('gameOver', ({ scores, winnerSocketId }) => {
+socket.on('gameOver', ({ scores, winnerSocketId, gameId }) => {
   updateScores(scores);
   showScreen('over');
   document.getElementById('btnRematch').disabled = false;
@@ -858,6 +863,13 @@ socket.on('gameOver', ({ scores, winnerSocketId }) => {
   overScore.textContent = `${scores[mySocketId] ?? 0} - ${(oppId && scores[oppId]) || 0}`;
   buzz(winnerSocketId === mySocketId ? [20, 70, 20, 70, 30] : 45);
   if (winnerSocketId === mySocketId) Sound.gameWin(); else Sound.gameLose();
+  // Tell the server this screen is actually showing the result — after the next
+  // frame, so "rendered" means drawn rather than merely assigned. A hidden tab
+  // may never draw it; then nothing is sent and the game stays unconfirmed,
+  // which is the truth. This is measurement only and changes nothing in play.
+  if (typeof gameId === 'string') {
+    requestAnimationFrame(() => socket.emit('resultRendered', { gameId }));
+  }
 });
 
 socket.on('opponentLeft', () => {

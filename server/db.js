@@ -11,6 +11,10 @@
 const fs = require('fs');
 const net = require('net');
 const { Pool } = require('pg');
+// The driver's own final parse of a connection string — the same code pg runs
+// when it connects. Used below to CHECK the TLS decision against what will
+// actually happen, rather than trusting a hand-written reading of the URL.
+const DriverParameters = require('pg/lib/connection-parameters');
 const SCHEMA = require('./schema');
 
 const CONNECTION_STRING = process.env.DATABASE_URL || '';
@@ -55,14 +59,57 @@ function readCa() {
  *            local: boolean, ignoredParams: string[], verified: boolean}}
  */
 function sslConfigFor(raw, env = process.env) {
+  const config = decideTls(raw, env);
+  // The acceptance rule, in one place: whatever this function decided, the
+  // driver — reading the exact string and ssl object it will be handed — must
+  // arrive at the same host and the same TLS setting. Three times a
+  // hand-written reading of the URL disagreed with pg (a host parameter over
+  // the authority, a repeated host, an empty last host), and each time the
+  // disagreement was "policy says local, no TLS; driver dials a remote server
+  // in plaintext". Patching each new spelling would go on forever. Checking the
+  // outcome does not.
+  assertDriverAgrees(config);
+  return config;
+}
+
+/**
+ * Throws unless pg, given exactly this string and ssl object, would connect to
+ * the host the TLS decision was made for, with that TLS setting.
+ *
+ * Separate so it can be tested on its own: the explicit rule above refuses
+ * every ambiguous spelling known today before this ever runs, so without a
+ * direct test this layer would be unproven — and it is the one that still holds
+ * for a spelling nobody has thought of yet.
+ */
+function assertDriverAgrees(config) {
+  const actual = new DriverParameters({ connectionString: config.connectionString, ssl: config.ssl });
+  const driverHost = String(actual.host || '').toLowerCase();
+  if (driverHost !== config.host) {
+    throw new Error(`DATABASE_URL is ambiguous: TLS was decided for "${config.host}" `
+      + `but the driver would connect to "${driverHost}"; refusing to connect`);
+  }
+  const driverVerifies = Boolean(actual.ssl) && actual.ssl.rejectUnauthorized === true;
+  if (config.verified !== driverVerifies || (!config.ssl && actual.ssl)) {
+    throw new Error('DATABASE_URL is ambiguous: the driver would not apply the TLS setting '
+      + 'that was decided for it; refusing to connect');
+  }
+}
+
+function decideTls(raw, env) {
   let url = null;
   try {
     url = new URL(raw);
   } catch (err) {
-    url = null; // unparseable: treat it as remote, which is the safe direction
+    url = null;
+  }
+  if (!url) {
+    // Previously "treat it as remote". But an address this code cannot read is
+    // exactly one whose target it cannot check, and the check below is the
+    // whole point.
+    throw new Error('DATABASE_URL could not be parsed; refusing to guess its target');
   }
 
-  const urlHost = url ? url.hostname.toLowerCase() : '';
+  const urlHost = url.hostname.toLowerCase();
 
   // Where pg will ACTUALLY connect. A `host=` query parameter overrides the
   // authority in the URL — measured against the driver's own parser — so reading
@@ -82,28 +129,38 @@ function sslConfigFor(raw, env = process.env) {
   // moved the divergence to the other side. Rather than reproduce the driver's
   // precedence from memory, a connection string whose target is ambiguous is
   // REFUSED: there is one right answer only when there is one host.
-  const queryHosts = url
-    ? [...new Set(url.searchParams.getAll('host').map((h) => h.trim().toLowerCase()).filter(Boolean))]
-    : [];
-  if (queryHosts.length > 1) {
-    throw new Error('DATABASE_URL names more than one host'
-      + ` (${queryHosts.join(', ')}); refusing to guess which one TLS applies to`);
+  //
+  // The accepted forms, stated rather than implied: the host in the authority,
+  // optionally replaced by ONE non-empty `host` parameter. Anything else is
+  // refused. The previous version dropped empty values before counting them
+  // (`filter(Boolean)`), and that changed the meaning: for
+  // `?host=localhost&host=` the policy saw one host, "localhost", while the
+  // driver took the empty last value, fell back to the authority and dialled
+  // the remote server with TLS off.
+  const rawHosts = url.searchParams.getAll('host');
+  if (rawHosts.length > 1) {
+    throw new Error(`DATABASE_URL has ${rawHosts.length} "host" parameters; `
+      + 'refusing to guess which one TLS applies to');
   }
-  const queryHost = queryHosts[0] || '';
+  if (rawHosts.length === 1 && rawHosts[0].trim() === '') {
+    throw new Error('DATABASE_URL has an empty "host" parameter; refusing to guess its target');
+  }
+  const queryHost = rawHosts.length === 1 ? rawHosts[0].trim().toLowerCase() : '';
+  if (!queryHost && !urlHost) {
+    // pg would fall back to PGHOST or "localhost" — a target nobody wrote down.
+    throw new Error('DATABASE_URL names no host; refusing to guess its target');
+  }
   const host = queryHost || urlHost;
   const local = Boolean(host) && LOCAL_HOSTS.has(host);
 
   const hostOverridden = Boolean(queryHost) && queryHost !== urlHost;
   const ignoredParams = [];
-  let connectionString = raw;
-  if (url) {
-    for (const param of SSL_URL_PARAMS) {
-      if (!url.searchParams.has(param)) continue;
-      ignoredParams.push(param);
-      url.searchParams.delete(param);
-    }
-    connectionString = url.toString();
+  for (const param of SSL_URL_PARAMS) {
+    if (!url.searchParams.has(param)) continue;
+    ignoredParams.push(param);
+    url.searchParams.delete(param);
   }
+  const connectionString = url.toString();
 
   // DB_SSL: 'off' disables TLS outright (a local socket, or a provider-side
   // tunnel that terminates it), 'on' forces verification even for a local host.
@@ -144,7 +201,11 @@ function sslConfigFor(raw, env = process.env) {
       // certificate for some OTHER host is still refused. An IP address is not
       // a valid SNI name (RFC 6066) — Node verifies it against the address
       // instead, so it is left unset there.
-      ...(host && net.isIP(host) === 0 ? { servername: host } : {}),
+      // URL.hostname keeps the brackets on an IPv6 literal ("[2001:db8::1]"),
+      // which net.isIP() does not recognise — so a bracketed address used to be
+      // sent as an SNI name. That failed closed (the name never matches), but it
+      // was still wrong.
+      ...(host && net.isIP(host.replace(/^\[|\]$/g, '')) === 0 ? { servername: host } : {}),
       ...(ca ? { ca } : {}),
     },
     host,
@@ -288,4 +349,8 @@ async function close() {
   if (pool) await pool.end().catch(() => {});
 }
 
-module.exports = { isEnabled, isReady, query, transaction, migrate, close, sslConfigFor, SCHEMA, STATS_SELECT };
+module.exports = {
+  isEnabled, isReady, query, transaction, migrate, close, sslConfigFor, SCHEMA, STATS_SELECT,
+  // Test seam only: the driver-agreement check on a config the tests build.
+  _assertDriverAgrees: assertDriverAgrees,
+};

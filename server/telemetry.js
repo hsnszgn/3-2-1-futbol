@@ -44,6 +44,10 @@ const SCHEMA_VERSION = 1;
 const EVENTS = {
   game_started: ['mode', 'max_rounds', 'rematch_of'],
   round_scored: ['round', 'points', 'scored_seat', 'elapsed_ms', 'outcome'],
+  // A round that nobody could win. It is not a scored round and must not
+  // count as one, but it is also not a fault — the report needs to tell the
+  // two apart, so it gets its own type rather than a zero-point score.
+  round_voided: ['round'],
   game_finished: ['score_a', 'score_b', 'winner_seat', 'rounds_played'],
   game_aborted: ['round', 'rounds_played'],
   recording_decided: ['decision', 'policy'],
@@ -69,6 +73,7 @@ const EVENTS = {
 // A free-text reason would make the report's own categories unverifiable, and
 // "unknown" must stay distinguishable from "deliberately left".
 const REASONS = {
+  round_voided: ['timeout_team', 'same_team', 'no_common_players', 'timeout_guess'],
   game_aborted: ['opponent_left', 'left', 'recovery_expired', 'room_gone',
     'server_error', 'shutdown', 'unknown'],
   recording_decided: ['both_signed_in', 'guest_seat', 'session_revoked',
@@ -77,6 +82,17 @@ const REASONS = {
   disconnect_observed: ['transport_close', 'transport_error', 'client_namespace_disconnect',
     'server_namespace_disconnect', 'ping_timeout', 'unknown'],
 };
+
+// Lookups into the two tables above go through this, never through `EVENTS[type]`
+// directly: a plain object answers for keys it inherits, so `EVENTS.toString`
+// is a function, `record('toString')` passed the "is this an event" check, and
+// iterating that function's "allowed fields" threw into the caller.
+const own = (table, key) => (typeof key === 'string'
+  && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : null);
+
+const isPlainObject = (value) => value !== null && typeof value === 'object'
+  && !Array.isArray(value)
+  && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 
 const SEATS = new Set(['A', 'B']);
 const SOURCES = new Set(['server', 'client']);
@@ -118,6 +134,7 @@ const state = {
   queue: [],
   draining: false,
   dropped: 0,
+  invalid: 0,
   written: 0,
   failed: 0,
   degraded: null, // the fault that degraded it, or null
@@ -132,9 +149,19 @@ const state = {
 //   writable   — the schema is in place, so they can be.
 // No connection string at all is a deployment without measurement, which is a
 // stated state, not a fault. Configured but not writable IS a fault.
-const isConfigured = () => db.isEnabled();
-const isEnabled = () => db.isReady();
+//
+// And above both: measurement is OFF unless TELEMETRY_ENABLED=1. The roadmap is
+// explicit that these events are not collected until they are in the data
+// inventory with a retention rule, and the retention job does not exist yet.
+// Without this switch, merging the code would have started writing events on
+// every deployment with a database — production included — the moment it
+// deployed. Off, record() still validates (so a wrong call is still caught in
+// development and in tests) but stores and queues nothing.
+const enabledByConfig = () => process.env.TELEMETRY_ENABLED === '1';
+const isConfigured = () => enabledByConfig() && db.isEnabled();
+const isEnabled = () => enabledByConfig() && db.isReady();
 const health = () => ({
+  enabled: enabledByConfig(),
   environment: state.environment,
   trafficKind: state.trafficKind,
   cohortId: state.cohortId,
@@ -143,6 +170,7 @@ const health = () => ({
   queued: state.queue.length,
   written: state.written,
   dropped: state.dropped,
+  invalid: state.invalid,
   failed: state.failed,
   degraded: state.degraded,
 });
@@ -167,35 +195,87 @@ function degrade(fault, extra = {}) {
   }));
 }
 
-function pickDetails(type, details) {
-  const allowed = EVENTS[type] || [];
+/**
+ * The allowed detail fields for this event type, validated.
+ *
+ * Two different things, handled differently on purpose:
+ *   - a key that is not in the contract is DROPPED. That is the allow-list: a
+ *     caller that hands over a whole payload stores only what the contract
+ *     names, and the tokens and answers in it never reach the table.
+ *   - a key that IS in the contract but carries something that is not a plain
+ *     scalar makes the whole event INVALID. Silently dropping it would store an
+ *     event that looks complete and is not; an object there is how a socket
+ *     payload would end up in the table; and a BigInt or a Symbol would throw
+ *     later, inside JSON.stringify, on the way to the database.
+ *
+ * @returns {{ok: true, details: object} | {ok: false, error: string}}
+ */
+function validDetails(allowed, details) {
+  if (details === undefined || details === null) return { ok: true, details: {} };
+  if (!isPlainObject(details)) return { ok: false, error: 'details_not_an_object' };
   const out = {};
   for (const key of allowed) {
+    if (!Object.prototype.hasOwnProperty.call(details, key)) continue;
     const value = details[key];
     if (value === undefined || value === null) continue;
-    // Scalars only. An object or array here would be the path by which a whole
-    // socket payload ends up in the measurement table.
-    if (typeof value === 'object') continue;
-    out[key] = typeof value === 'string' ? value.slice(0, 200) : value;
+    if (typeof value === 'string') {
+      out[key] = value.slice(0, 200);
+    } else if (typeof value === 'boolean') {
+      out[key] = value;
+    } else if (typeof value === 'number') {
+      // NaN and Infinity serialise to null: a score of NaN would be stored as
+      // "no score" and read back as nothing wrong.
+      if (!Number.isFinite(value)) return { ok: false, error: `details.${key}_not_finite` };
+      out[key] = value;
+    } else {
+      return { ok: false, error: `details.${key}_not_a_scalar` };
+    }
   }
-  return out;
+  return { ok: true, details: out };
 }
 
+const optionalString = (value, max = 200) => value === undefined || value === null
+  || (typeof value === 'string' && value.length > 0 && value.length <= max);
+
 /**
- * Builds a row, or returns null if the event is not one this module accepts.
+ * Builds a row, or explains why not.
  *
- * Validation failures are counted and degrade the process rather than throwing:
- * the caller is the game, and a bad call must not take a round down with it.
+ * Every field is checked explicitly — the shape of `fields`, each identifier,
+ * the seat, the source, the reason code, the timestamp and the details — so
+ * that nothing past this point can throw on the way to the database. This is
+ * validation, not a catch-all: a check that is missing here is a bug to fix,
+ * not something to be swallowed further down.
+ *
+ * @returns {{row: object} | {error: string}}
  */
-function build(type, { eventId, gameId, attemptId, seat, source = 'server',
-  reasonCode = null, occurredAt = null, trafficKind = null, details = {} } = {}) {
-  if (!EVENTS[type]) return null;
-  if (!SOURCES.has(source)) return null;
-  if (seat != null && !SEATS.has(seat)) return null;
-  if (reasonCode != null) {
-    const allowed = REASONS[type];
-    if (!allowed || !allowed.includes(reasonCode)) return null;
+function validate(type, fields) {
+  const allowed = own(EVENTS, type);
+  if (!allowed) return { error: 'unknown_event_type' };
+  if (fields === undefined || fields === null) fields = {};
+  if (!isPlainObject(fields)) return { error: 'fields_not_an_object' };
+  const {
+    eventId, gameId, attemptId, seat, source = 'server',
+    reasonCode = null, occurredAt = null, trafficKind = null, details,
+  } = fields;
+
+  if (!optionalString(eventId)) return { error: 'bad_event_id' };
+  if (!optionalString(gameId)) return { error: 'bad_game_id' };
+  if (attemptId !== undefined && attemptId !== null && !Number.isSafeInteger(attemptId)) {
+    return { error: 'bad_attempt_id' };
   }
+  if (seat !== undefined && seat !== null && !SEATS.has(seat)) return { error: 'bad_seat' };
+  if (!SOURCES.has(source)) return { error: 'bad_source' };
+  if (reasonCode !== null && reasonCode !== undefined) {
+    const reasons = own(REASONS, type);
+    if (!reasons || !reasons.includes(reasonCode)) return { error: 'bad_reason_code' };
+  }
+  if (occurredAt !== null && occurredAt !== undefined
+    && !(occurredAt instanceof Date && Number.isFinite(occurredAt.getTime()))) {
+    return { error: 'bad_occurred_at' };
+  }
+  const checked = validDetails(allowed, details);
+  if (!checked.ok) return { error: checked.error };
+
   // The kind of traffic is a server decision, and it can only ever be WEAKENED
   // here: a caller may say "this one is automated" (a controlled disconnect
   // inside a beta deployment is not a human game), but nothing a caller passes
@@ -203,31 +283,50 @@ function build(type, { eventId, gameId, attemptId, seat, source = 'server',
   // configuration alone — it is the entire defence of H, and a client notice
   // asking for it would otherwise inflate the denominator of the beta gate.
   const WEAKER = new Set(['automated', 'manual_qa']);
-  const kind = trafficKind && WEAKER.has(trafficKind) ? trafficKind : state.trafficKind;
+  const kind = typeof trafficKind === 'string' && WEAKER.has(trafficKind) ? trafficKind : state.trafficKind;
   return {
-    eventId: eventId || randomUUID(),
-    schemaVersion: SCHEMA_VERSION,
-    type,
-    gameId: gameId || null,
-    attemptId: Number.isInteger(attemptId) ? attemptId : null,
-    seat: seat || null,
-    // The server's clock, taken now — not the client's, and not the time the row
-    // happens to reach the database. Queue lag must not move an event.
-    occurredAt: occurredAt instanceof Date ? occurredAt : new Date(),
-    environment: state.environment,
-    trafficKind: kind,
-    cohortId: state.cohortId,
-    releaseSha: state.releaseSha,
-    processInstanceId: PROCESS_INSTANCE_ID,
-    source,
-    reasonCode,
-    details: pickDetails(type, details),
-    attempts: 0,
+    row: {
+      eventId: eventId || randomUUID(),
+      schemaVersion: SCHEMA_VERSION,
+      type,
+      gameId: gameId || null,
+      attemptId: Number.isSafeInteger(attemptId) ? attemptId : null,
+      seat: seat || null,
+      // The server's clock, taken now — not the client's, and not the time the
+      // row happens to reach the database. Queue lag must not move an event.
+      occurredAt: occurredAt || new Date(),
+      environment: state.environment,
+      trafficKind: kind,
+      cohortId: state.cohortId,
+      releaseSha: state.releaseSha,
+      processInstanceId: PROCESS_INSTANCE_ID,
+      source,
+      reasonCode: reasonCode || null,
+      details: checked.details,
+      attempts: 0,
+    },
   };
+}
+
+/** For the module's own events, which are built from literals and cannot fail. */
+function build(type, fields) {
+  const result = validate(type, fields);
+  return result.row || null;
+}
+
+/** Counts a refused event and marks the measurement as suspect. Never throws. */
+function refuse(type, error) {
+  state.dropped += 1;
+  state.invalid += 1;
+  state.degraded = state.degraded || 'invalid_event';
+  console.error(`telemetry: refusing ${typeof type === 'string' ? type.slice(0, 40) : typeof type} event: ${error}`);
 }
 
 function enqueue(row) {
   if (!row) return null;
+  // Switched off: nothing is kept, not even in memory. Not a drop and not a
+  // fault — it is the configured state.
+  if (!enabledByConfig()) return null;
   if (state.queue.length >= MAX_QUEUE) {
     state.dropped += 1;
     // Not a recursive degrade(): that would enqueue on a full queue.
@@ -266,19 +365,29 @@ async function writeRow(row) {
   // ON CONFLICT DO NOTHING happened: the id is already stored. Idempotent
   // redelivery is the normal case and must not be reported as anything; the
   // interesting case is the same id carrying something else.
+  //
+  // The comparison is done BY THE DATABASE, as jsonb equality. The first version
+  // compared JSON.stringify of the stored details with the new ones, but jsonb
+  // does not keep key order — a round_scored written as
+  // {round, points, scored_seat, elapsed_ms, outcome} comes back as
+  // {round, points, outcome, elapsed_ms, scored_seat} — so an IDENTICAL
+  // redelivery, the most ordinary thing a queue does, was reported as a
+  // contradiction and degraded the whole process. jsonb `=` is defined on
+  // content, not on spelling.
   const existing = await db.query(
-    `SELECT event_type, game_id, attempt_id, seat, source, reason_code, details
-       FROM telemetry_events WHERE event_id = $1`, [row.eventId]);
+    `SELECT (event_type = $2
+             AND game_id IS NOT DISTINCT FROM $3
+             AND attempt_id IS NOT DISTINCT FROM $4
+             AND seat IS NOT DISTINCT FROM $5
+             AND source = $6
+             AND reason_code IS NOT DISTINCT FROM $7
+             AND details = $8::jsonb) AS same
+       FROM telemetry_events WHERE event_id = $1`,
+    [row.eventId, row.type, row.gameId, row.attemptId, row.seat, row.source,
+      row.reasonCode, JSON.stringify(row.details)]);
   const prev = existing.rows[0];
   if (!prev) return; // deleted between the two statements; nothing to compare
-  const same = prev.event_type === row.type
-    && (prev.game_id || null) === row.gameId
-    && (prev.attempt_id === null ? null : Number(prev.attempt_id)) === row.attemptId
-    && (prev.seat || null) === row.seat
-    && prev.source === row.source
-    && (prev.reason_code || null) === row.reasonCode
-    && JSON.stringify(prev.details || {}) === JSON.stringify(row.details);
-  if (same) return;
+  if (prev.same) return;
   await db.query(INSERT, params({
     ...build('telemetry_conflict', {
       gameId: row.gameId,
@@ -345,12 +454,10 @@ function withTimeout(promise, ms) {
  * @returns {string|null} the event id, for a caller that wants to relate a
  *   later event to this one (a disconnect episode, say). Never a promise.
  */
-function record(type, fields = {}) {
-  const row = build(type, fields);
+function record(type, fields) {
+  const { row, error } = validate(type, fields);
   if (!row) {
-    state.dropped += 1;
-    state.degraded = state.degraded || 'invalid_event';
-    console.error(`telemetry: refusing invalid event ${type}`);
+    refuse(type, error);
     return null;
   }
   // The id only comes back if the event was actually accepted: a caller that
@@ -370,11 +477,12 @@ function record(type, fields = {}) {
  * @returns {Promise<boolean>} true when stored; false when it could not be, so
  *   the caller can refuse to start rather than play an unmeasured game.
  */
-async function recordDurable(type, fields = {}) {
-  const row = build(type, fields);
+async function recordDurable(type, fields) {
+  // A documented false, not a rejection: the caller refuses to start a game on
+  // false, and an unexpected rejection would be an unhandled one in the game.
+  const { row, error } = validate(type, fields);
   if (!row) {
-    state.dropped += 1;
-    state.degraded = state.degraded || 'invalid_event';
+    refuse(type, error);
     return false;
   }
   // Nowhere to write by configuration: say so plainly (the caller refuses to
@@ -424,6 +532,7 @@ function _reset(env = process.env) {
   state.draining = false;
   state.closing = false;
   state.dropped = 0;
+  state.invalid = 0;
   state.written = 0;
   state.failed = 0;
   state.degraded = null;

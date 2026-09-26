@@ -246,10 +246,17 @@ module.exports = async function run() {
       const next = await waitFor(a, 'roundStart', 20000);
       await waitForAll([a, b], 'openTeamSubmit', 15000);
       const accepted = Promise.all([waitFor(a, 'teamAccepted', 8000), waitFor(b, 'teamAccepted', 8000)]);
+      // Listening BEFORE submitting. The server sends the second player's
+      // teamAccepted and the room's teamsRevealed from the same synchronous
+      // handler, so both can be processed before `await accepted` resumes; a
+      // listener attached after it then waits for an event that has already
+      // gone. That happened once in four runs (Node 24, no database) and was
+      // reproduced every time by pausing 300ms before attaching.
+      const revealed = waitFor(a, 'teamsRevealed', 15000);
       submit(a, 'submitTeam', { team: 'Chelsea' });
       submit(b, 'submitTeam', { team: 'Liverpool' });
       await accepted;
-      await waitFor(a, 'teamsRevealed', 15000);
+      await revealed;
 
       // Sit through the moment the old lookup resolves (~9s after round 1's
       // teams), which falls inside this round's guess phase.
