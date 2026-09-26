@@ -14,7 +14,10 @@
 #     and merging the two numbers would hide that.
 #
 # RUN HISTORY (kept here because a workflow's own claims are worthless without
-# it): run #1 on bbcb58d and run #2 on cd658b5 both FAILED on GitHub Actions,
+# it): run #3 on 3b69b67 is the first END-TO-END GREEN run — all four steps on
+# both Node versions (22.22.2 and 24.21.0).
+#
+# Before it: run #1 on bbcb58d and run #2 on cd658b5 both FAILED on GitHub Actions,
 # both times in the isolated-PostgreSQL steps and both times for the same
 # reason — on a genuinely cold database the server's migration finishes AFTER
 # the port opens, so a test registering an account immediately got
@@ -47,7 +50,11 @@ jobs:
           POSTGRES_DB: testdb
         ports: ['5432:5432']
         options: >-
-          --health-cmd pg_isready
+          # -U postgres on purpose: the default probes as the runner's own user
+          # ("root"), which the container refuses, and every 5s of a 19-minute run
+          # lands a FATAL line in the service log. The probe still succeeded, so the
+          # jobs were green — the noise just made the log harder to read.
+          --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
