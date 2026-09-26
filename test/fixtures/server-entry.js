@@ -134,4 +134,19 @@ if (process.env.AUTH_LOOKUP_DELAY_MS) {
   });
 }
 
+// An optional slow migration. The port opens before the schema is in place, and
+// that gap is real: on a cold CI database the first register landed in it and got
+// 503 accounts_unavailable while every local run — where the schema already
+// existed — never saw it. This knob makes the gap reproducible, so the harness's
+// readiness wait can be tested instead of assumed.
+if (process.env.TEST_MIGRATE_DELAY_MS) {
+  const db = require('../../server/db');
+  const realMigrate = db.migrate;
+  const delay = Number(process.env.TEST_MIGRATE_DELAY_MS);
+  db.migrate = async () => {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return realMigrate();
+  };
+}
+
 require('../../server/index.js');

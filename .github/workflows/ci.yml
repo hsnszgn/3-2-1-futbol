@@ -13,9 +13,15 @@
 #     one command. A suite that skipped the account tests has not verified them,
 #     and merging the two numbers would hide that.
 #
-# NOT YET RUN: this file has never executed on GitHub Actions — this repository
-# had no CI at all. Until a run exists, A3 stays open and no result here may be
-# quoted as evidence.
+# RUN HISTORY (kept here because a workflow's own claims are worthless without
+# it): run #1 on bbcb58d and run #2 on cd658b5 both FAILED on GitHub Actions,
+# both times in the isolated-PostgreSQL steps and both times for the same
+# reason — on a genuinely cold database the server's migration finishes AFTER
+# the port opens, so a test registering an account immediately got
+# 503 accounts_unavailable. Locally the schema already existed, so neither
+# failure ever reproduced until a `TEST_MIGRATE_DELAY_MS` knob was added to the
+# test fixture. Both runners now wait for readiness. No result quoted from a run
+# older than the fix is evidence of anything.
 name: CI
 
 on:

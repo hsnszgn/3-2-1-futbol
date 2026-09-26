@@ -75,7 +75,21 @@ function sslConfigFor(raw, env = process.env) {
   //
   // The decision follows the real target, which is the safe direction: a remote
   // target is verified even when the authority looks local.
-  const queryHost = url ? (url.searchParams.get('host') || '').trim().toLowerCase() : '';
+  // A repeated `host` parameter is where hand-reading the URL went wrong: this
+  // code took the FIRST value while `pg-connection-string` takes the last, so
+  // `?host=localhost&host=db.example.com` had the policy deciding for localhost
+  // (no TLS) while the driver dialled db.example.com — and reversing the order
+  // moved the divergence to the other side. Rather than reproduce the driver's
+  // precedence from memory, a connection string whose target is ambiguous is
+  // REFUSED: there is one right answer only when there is one host.
+  const queryHosts = url
+    ? [...new Set(url.searchParams.getAll('host').map((h) => h.trim().toLowerCase()).filter(Boolean))]
+    : [];
+  if (queryHosts.length > 1) {
+    throw new Error('DATABASE_URL names more than one host'
+      + ` (${queryHosts.join(', ')}); refusing to guess which one TLS applies to`);
+  }
+  const queryHost = queryHosts[0] || '';
   const host = queryHost || urlHost;
   const local = Boolean(host) && LOCAL_HOSTS.has(host);
 
@@ -144,8 +158,19 @@ function sslConfigFor(raw, env = process.env) {
 
 let pool = null;
 
+// An unusable connection string disables accounts rather than taking the game
+// down: this runs at require time, so throwing here would kill the process, and
+// the game itself needs no database at all.
+let tls = null;
 if (CONNECTION_STRING) {
-  const tls = sslConfigFor(CONNECTION_STRING);
+  try {
+    tls = sslConfigFor(CONNECTION_STRING);
+  } catch (err) {
+    console.error(`DATABASE_URL refused, accounts are disabled: ${err.message}`);
+  }
+}
+
+if (tls) {
   if (tls.ignoredParams.length) {
     // Names only — a connection string's values are secrets.
     console.warn('DATABASE_URL SSL parameters ignored (TLS is decided in code):'

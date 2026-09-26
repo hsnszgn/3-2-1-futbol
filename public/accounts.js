@@ -67,14 +67,22 @@ const Accounts = (() => {
         headers,
         ...(controller ? { signal: controller.signal } : {}),
       });
-      const body = await res.json().catch(() => ({}));
+      // A response whose body cannot be read is not an answer. Every caller here
+      // needs the JSON, and the headers arriving first does not mean the rest
+      // will: the abort fires on a stalled body too. Swallowed with
+      // `.catch(() => ({}))` that produced a SUCCESSFUL empty config, which
+      // readConfig then read as "this deployment has no accounts" — notice
+      // hidden, retries stopped, only a reload left. So it goes to the catch
+      // below with everything else that failed to arrive.
+      const body = await res.json();
       return { ok: res.ok, status: res.status, body };
     } catch (err) {
-      // Offline, DNS failure, a timed-out abort: fetch REJECTS rather than
-      // answering with a status. Uncaught, that rejection took init() itself
-      // down — no button listeners were bound and no recheck was ever
-      // scheduled, so the page could not come back without a reload, which is
-      // the exact failure the recovery work was supposed to remove.
+      // Offline, DNS failure, a timed-out abort, a body that never finished:
+      // fetch REJECTS rather than answering with a status. Uncaught, that
+      // rejection took init() itself down — no button listeners were bound and
+      // no recheck was ever scheduled, so the page could not come back without
+      // a reload, which is the exact failure the recovery work was meant to
+      // remove.
       //
       // status 0 means "no answer at all". Callers read that as retryable, not
       // as a verdict about the service or about the session.
@@ -366,6 +374,12 @@ const Accounts = (() => {
       // A request that never arrived says nothing about configuration. Treat it
       // as the retryable state rather than claiming this deployment has no
       // accounts — that claim would stick until a reload.
+      status = UNAVAILABLE;
+    } else if (typeof body.accountsConfigured !== 'boolean') {
+      // A 200 that is not the config we asked for — a proxy's error page, a
+      // truncated body, anything unexpected. "No accounts in this deployment"
+      // is a claim that sticks until a reload, so it is never the conclusion
+      // drawn from an answer we could not read.
       status = UNAVAILABLE;
     } else if (body.accountsEnabled) {
       status = READY;

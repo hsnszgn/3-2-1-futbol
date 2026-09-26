@@ -21,6 +21,9 @@ const assert = require('assert');
 const { twoPlayers, startGame, playRound, register, sleep } = require('./helpers');
 
 module.exports.needsDatabase = true;
+// This spec IS the readiness test: it starts with the gate shut and opens it
+// itself, so the runner must not wait for accounts to be ready first.
+module.exports.waitsForAccounts = false;
 // The gate starts closed: the server is configured for accounts but announces
 // them as unavailable until the test opens it.
 module.exports.env = { FIXTURE: 'readiness-server-entry.js', MAX_ROUNDS: '1' };

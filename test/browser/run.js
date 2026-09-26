@@ -18,7 +18,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { startTestServer } = require('../helpers');
+const { startTestServer, waitForAccounts } = require('../helpers');
 
 const DIR = __dirname;
 const filter = process.argv[2] || '';
@@ -105,6 +105,18 @@ async function main() {
         ...(spec.mod.env || {}),
         ...(spec.mod.needsDatabase ? { DATABASE_URL: TEST_DB } : {}),
       });
+      // The port opens before the migration finishes. A spec that registers an
+      // account straight away lands in that gap and gets 503
+      // accounts_unavailable — which is what happened in CI on a cold database
+      // while every local run, with the schema already there, passed. Readiness
+      // is waited for, not assumed.
+      //
+      // A spec that drives readiness itself (account-readiness holds the gate
+      // shut on purpose) says so with `waitsForAccounts = false`; waiting there
+      // would hang forever.
+      if (spec.mod.needsDatabase && spec.mod.waitsForAccounts !== false) {
+        await waitForAccounts(server);
+      }
       // A spec that drives the server's own state (a readiness gate, a
       // controlled account lookup) needs the handle, not just the URL.
       const detail = await spec.mod.run({ browser, baseUrl: server.url, server });

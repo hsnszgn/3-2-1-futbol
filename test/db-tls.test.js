@@ -184,6 +184,39 @@ module.exports = async function run() {
     notes.push(`politika host'u sürücünün gerçek hedefiyle aynı (${cases.length} biçim); "?host=" ile uzağa taşınan bağlantı artık doğrulanıyor`);
   }
 
+  // --- 1c. two hosts in one URL must be refused, not guessed ---------------
+  // A repeated `host=` parameter is the gap 1b leaves open: the policy reads one
+  // value while the driver dials another. `URLSearchParams.get()` returns the
+  // FIRST occurrence and pg keeps the LAST, so a URL naming localhost first and
+  // a remote host second would have been treated as local — no TLS — while the
+  // driver connected to the remote server. There is no safe way to pick one, so
+  // the connection string is refused and accounts stay disabled.
+  {
+    // The divergence, measured rather than assumed. If pg ever starts keeping
+    // the first value this control fails and the reasoning above is out of date.
+    const both = 'postgres://user:pw@ignored.example.com/app?host=localhost&host=db.example.com';
+    assert.strictEqual(new URL(both).searchParams.get('host'), 'localhost',
+      'URLSearchParams no longer returns the first value — this test is out of date');
+    assert.strictEqual(String(new ConnectionParameters({ connectionString: both }).host), 'db.example.com',
+      'pg no longer keeps the last host — this test is out of date');
+
+    // Both orders, so the refusal is not an accident of which one happens to be
+    // local: whichever value a reader takes, the other one is a different server.
+    for (const raw of [both, 'postgres://user:pw@ignored.example.com/app?host=db.example.com&host=localhost']) {
+      assert.throws(() => db.sslConfigFor(raw, {}), /more than one host/i,
+        `a URL naming two hosts was accepted: ${raw}`);
+    }
+
+    // And the refusal must be about ambiguity, not about the parameter existing:
+    // one host, even repeated with the same value, still resolves.
+    const single = db.sslConfigFor('postgres://user:pw@ignored.example.com/app?host=db.example.com&host=db.example.com', {});
+    assert.strictEqual(single.host, 'db.example.com', 'a single repeated host was not resolved');
+    assert.ok(single.ssl && single.ssl.rejectUnauthorized === true,
+      'a remote single host lost its verification');
+    notes.push('aynı URL\'de iki farklı "host=" değeri reddediliyor (her iki sırada); '
+      + 'ölçüm: URLSearchParams ilkini, pg sonuncusunu alıyor · tek host (tekrar etse de) çalışıyor');
+  }
+
   // --- 2. the connection string cannot weaken it ---------------------------
   {
     // First, the behaviour being defended against, measured in pg itself.

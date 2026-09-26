@@ -20,9 +20,14 @@
  *   2. /api/config answering "ready" reset the retry budget even when /api/me
  *      then failed, so the backoff never grew past its first step and the
  *      20-attempt limit was never reached: an endless 3-second poll.
+ *   3. a 200 whose BODY never finished arriving was read as a successful empty
+ *      config, which means "this deployment has no accounts" — notice hidden,
+ *      retries stopped, only a reload left. Scenario 4 drives that one over a
+ *      real HTTP connection: real headers, a real stalled body, the real abort.
  */
 const assert = require('assert');
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
 const vm = require('vm');
 
@@ -196,6 +201,69 @@ module.exports = async function run() {
     await new Promise(setImmediate);
     assert.ok(app.timers.size >= 1, 'the manual retry did not start a new attempt');
     notes.push(`config hazır + /api/me 503: tam 20 deneme, gecikmeler ${[...new Set(app.delays)].join('/')}ms, jeton korundu, manuel tekrar yeni bütçe açıyor`);
+  }
+
+  // --- 4. headers arrive, the body never does --------------------------------
+  // The one case a controlled `fetch` cannot fake, so this one speaks real HTTP:
+  // the server sends 200 and its JSON content-type, then holds the body open.
+  // The request's own 10s abort then rejects res.json().
+  {
+    let stall = true;
+    const server = http.createServer((req, res) => {
+      if (stall) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.flushHeaders(); // ...and never a body.
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ accountsConfigured: true, accountsEnabled: true, tiers: [] }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    try {
+      // The abort must not fire until the RESPONSE exists, or this measures a
+      // rejected fetch all over again (scenario 2) instead of a body that never
+      // arrived — which is exactly how the first version of this scenario passed
+      // against the unfixed client.
+      let headersArrived;
+      const gotHeaders = new Promise((resolve) => { headersArrived = resolve; });
+      const app = harness({
+        fetch: async (url, options) => {
+          const res = await fetch(`${base}${url}`, options);
+          headersArrived();
+          return res;
+        },
+      });
+      const initialized = app.run('Accounts.init()');
+      await gotHeaders;
+      await new Promise((resolve) => setImmediate(resolve));
+      // Now fire the request's own 10-second timeout, without waiting ten seconds.
+      assert.ok(app.delays.includes(10000), 'the request did not arm its own timeout');
+      await app.tick();
+      await initialized;
+
+      assert.strictEqual(app.run('Accounts.getStatus()'), 'unavailable',
+        'a 200 with an unreadable body was treated as "this deployment has no accounts"');
+      assert.strictEqual(app.node('accountNotice').classList.contains('hidden'), false,
+        'nothing was shown to the player after the body failed to arrive');
+      assert.ok(app.timers.size >= 1, 'no recheck was scheduled after the body failed');
+
+      // And the same page recovers once the server answers properly. The recheck
+      // it fires is a real HTTP round trip, so this waits for the answer rather
+      // than assuming one tick is enough.
+      stall = false;
+      await app.tick();
+      for (let i = 0; i < 400 && !app.run('Accounts.isEnabled()'); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.strictEqual(app.run('Accounts.isEnabled()'), true,
+        'the page did not come back after a healthy config answer');
+      notes.push('200 başlık + askıda gövde: abort sonrası unavailable, uyarı görünür, tekrar kuruldu; sağlıklı config gelince aynı sayfa hazır oldu');
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   }
 
   return notes.join(' · ');
