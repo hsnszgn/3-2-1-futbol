@@ -154,7 +154,11 @@ module.exports = async function run({ databaseUrl }) {
         assert.ok(!all.includes(needle), `"${needle}" reached the measurement table`);
       }
 
-      const klass = classifyGames(rows, { liveProcesses: new Set() }).get(gameId);
+      // A guest game's policy is "skip", so the table must hold NO row for it —
+      // read it rather than assume it.
+      const guestRows = (await db.query('SELECT * FROM matches WHERE match_uid = $1', [gameId])).rows;
+      assert.strictEqual(guestRows.length, 0, 'a guest game has a stored result');
+      const klass = classifyGames(rows, { liveProcesses: new Set(), matchRows: guestRows }).get(gameId);
       assert.strictEqual(klass.klass, 'C', `a clean guest game classified as ${JSON.stringify(klass)}`);
       notes.push(`misafir maçı: ${seq.join(' → ')}; skor turdan türüyor, kayıt kararı "guest_seat", `
         + 'iki ekran bildirimi source=client, isim/cevap/takım tabloya girmedi, sınıflandırma C');
@@ -249,7 +253,9 @@ module.exports = async function run({ databaseUrl }) {
       assert.strictEqual(matchRows.length, 1, 'the persisted game has no row');
       const { findings } = reconcile({ events: rows, matchRows });
       assert.deepStrictEqual(findings, [], `reconciliation disagrees with a clean game: ${JSON.stringify(findings)}`);
-      assert.strictEqual(classifyGames(rows, {}).get(over.gameId).klass, 'C');
+      assert.strictEqual(classifyGames(rows, { matchRows }).get(over.gameId).klass, 'C');
+      // Without reading the table the same game is NOT complete: unverified.
+      assert.strictEqual(classifyGames(rows, {}).get(over.gameId).reason, 'records_unverified');
       notes.push('girişli maç: recording_decided/persist → match_persisted, matches satırı var, '
         + 'uzlaştırma bulgu üretmedi, sınıflandırma C');
     }

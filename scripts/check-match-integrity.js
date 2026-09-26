@@ -30,6 +30,8 @@
  */
 
 const { Client } = require('pg');
+const { gameFindings } = require('../server/betaMetrics');
+const { collect, clientConfig, scopeFromArgs } = require('./beta-report');
 
 function parseArgs(argv) {
   const args = {};
@@ -43,10 +45,15 @@ function parseArgs(argv) {
 }
 
 /**
+ * @param {{events: object[], matchRows: object[], outOfSetRows?: object[]}} input
+ *   `events` and `matchRows` belong to the SAME game set (selected by start
+ *   event, exactly as the report selects it). `outOfSetRows` are stored results
+ *   in the date window that are NOT in that set — the reverse direction, kept
+ *   separate and labelled, so two different windows are never compared as one.
  * @returns {{findings: object[], checked: number}} one finding per problem, each
  *   naming the game it belongs to so it can be looked up.
  */
-function reconcile({ events, matchRows }) {
+function reconcile({ events, matchRows, outOfSetRows = [] }) {
   const byGame = new Map();
   for (const event of events) {
     if (!event.game_id) continue;
@@ -55,84 +62,25 @@ function reconcile({ events, matchRows }) {
   }
   const rowsByUid = new Map(matchRows.map((row) => [row.match_uid, row]));
   const findings = [];
-  const add = (gameId, kind, detail) => findings.push({ gameId, kind, detail });
 
+  // (1)-(3) and (5): the same function the report classifies with, so the two
+  // cannot disagree about a game.
   for (const [gameId, rows] of byGame) {
-    const finished = rows.filter((r) => r.event_type === 'game_finished');
-    const scored = rows.filter((r) => r.event_type === 'round_scored');
-    const decided = rows.find((r) => r.event_type === 'recording_decided');
-    const persisted = rows.find((r) => r.event_type === 'match_persisted');
-    const persistFailed = rows.find((r) => r.event_type === 'match_persist_failed');
-
-    // (3) two different results under one id. The unique index on match_uid
-    // would hide this by keeping the first row; the events do not.
-    if (finished.length > 1) {
-      const distinct = new Set(finished.map((f) => JSON.stringify([
-        f.details.score_a, f.details.score_b, f.details.winner_seat])));
-      add(gameId, distinct.size > 1 ? 'conflicting_results' : 'duplicate_result',
-        `${finished.length} game_finished olayı, ${distinct.size} farklı sonuç`);
-    }
-    if (!finished.length) continue;
-    const result = finished[0].details || {};
-
-    // (1) the score has to be the sum of what was scored, and the winner has to
-    // follow from the score.
-    const totals = { A: 0, B: 0 };
-    const seenAttempts = new Set();
-    for (const row of scored) {
-      const key = `${row.attempt_id}:${row.details && row.details.scored_seat}`;
-      if (seenAttempts.has(key)) {
-        add(gameId, 'attempt_scored_twice', `deneme ${row.attempt_id} iki kez puanlandı`);
-        continue;
-      }
-      seenAttempts.add(key);
-      const seat = (row.details && row.details.scored_seat) || row.seat;
-      if (seat === 'A' || seat === 'B') totals[seat] += Number((row.details && row.details.points) || 0);
-    }
-    if (Number(result.score_a) !== totals.A || Number(result.score_b) !== totals.B) {
-      add(gameId, 'score_mismatch',
-        `turlar ${totals.A}-${totals.B}, sonuç ${result.score_a}-${result.score_b}`);
-    }
-    const derivedWinner = totals.A === totals.B ? 'draw' : (totals.A > totals.B ? 'A' : 'B');
-    if ((result.winner_seat || 'draw') !== derivedWinner) {
-      add(gameId, 'winner_mismatch',
-        `skordan türeyen ${derivedWinner}, olaydaki ${result.winner_seat || 'draw'}`);
-    }
-
-    // (2) and (5) the row, and the decision that governs it.
-    const row = rowsByUid.get(gameId);
-    const expectPersist = decided ? (decided.details || {}).decision === 'persist' : null;
-    if (expectPersist === null) {
-      add(gameId, 'recording_decision_missing', 'kayıt kararı olayı yok; kanıt eksik');
-    } else if (expectPersist && !row) {
-      add(gameId, persistFailed ? 'persist_failed' : 'row_missing',
-        persistFailed ? `kayıt hatası: ${(persistFailed.details || {}).error_kind}` : 'beklenen satır yok');
-    } else if (!expectPersist && row) {
-      add(gameId, 'unexpected_row',
-        `politika "${decided.reason_code}" diyor ama satır var (id ${row.id})`);
-    } else if (expectPersist && row) {
-      if (!persisted) add(gameId, 'persist_event_missing', 'satır var, match_persisted olayı yok');
-      const rowWinner = row.winner_id === null ? 'draw'
-        : row.winner_id === row.player_a ? 'A' : row.winner_id === row.player_b ? 'B' : 'other';
-      if (Number(row.score_a) !== Number(result.score_a)
-        || Number(row.score_b) !== Number(result.score_b)) {
-        add(gameId, 'row_score_mismatch',
-          `satır ${row.score_a}-${row.score_b}, olay ${result.score_a}-${result.score_b}`);
-      }
-      if (rowWinner !== (result.winner_seat || 'draw')) {
-        add(gameId, 'row_winner_mismatch', `satır ${rowWinner}, olay ${result.winner_seat || 'draw'}`);
-      }
+    for (const f of gameFindings(rows, { matchRow: rowsByUid.get(gameId), recordsChecked: true })) {
+      findings.push({ gameId, kind: f.kind, severity: f.severity, detail: f.detail });
     }
   }
 
   // (4) the other direction: a stored result with no events behind it.
-  for (const row of matchRows) {
+  for (const row of [...matchRows, ...outOfSetRows]) {
     if (!row.match_uid) {
-      add(null, 'row_without_uid', `satır ${row.id} match_uid taşımıyor (ölçüm öncesi kayıt olabilir)`);
+      findings.push({ gameId: null, kind: 'row_without_uid', severity: 'evidence',
+        detail: `satır ${row.id} match_uid taşımıyor (ölçüm öncesi kayıt olabilir)` });
       continue;
     }
     if (!byGame.has(row.match_uid)) {
-      add(row.match_uid, 'row_without_events', `satır ${row.id} için hiç ölçüm olayı yok; kanıt eksik`);
+      findings.push({ gameId: row.match_uid, kind: 'row_without_events', severity: 'evidence',
+        detail: `satır ${row.id} için bu kapsamda ölçüm olayı yok; kanıt eksik` });
     }
   }
 
@@ -147,28 +95,32 @@ async function main() {
       + 'never taken from the command line.');
     process.exit(2);
   }
-  const client = new Client({
-    connectionString: url,
-    ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: true },
-  });
+  // The server's own TLS policy (server/dbTls.js), not a local copy of an older
+  // rule: an ambiguous address is refused rather than connected to.
+  let config;
+  try {
+    config = clientConfig(url);
+  } catch (err) {
+    console.error(`refusing to connect: ${err.message}`);
+    process.exit(2);
+  }
+  const client = new Client(config);
   await client.connect();
   try {
-    const events = (await client.query(
-      `SELECT event_id, event_type, game_id, attempt_id, seat, source, reason_code, details,
-              server_occurred_at
-         FROM telemetry_events
-        WHERE ($1::text IS NULL OR beta_cohort_id = $1)
-          AND ($2::timestamptz IS NULL OR server_occurred_at >= $2)
-          AND ($3::timestamptz IS NULL OR server_occurred_at < $3)`,
-      [args.cohort || null, args.from || null, args.to || null])).rows;
-    const matchRows = (await client.query(
+    // The same game set the report uses: selected by START event, same filters.
+    const scope = scopeFromArgs(args);
+    const data = await collect(client, scope);
+    // Reverse direction, labelled: rows played in the window whose game is not
+    // in the set. Different question, so a different, named query.
+    const outOfSetRows = (await client.query(
       `SELECT id, match_uid, player_a, player_b, score_a, score_b, winner_id, played_at
          FROM matches
         WHERE ($1::timestamptz IS NULL OR played_at >= $1)
-          AND ($2::timestamptz IS NULL OR played_at < $2)`,
-      [args.from || null, args.to || null])).rows;
+          AND ($2::timestamptz IS NULL OR played_at < $2)
+          AND (match_uid IS NULL OR NOT (match_uid = ANY($3)))`,
+      [scope.from, scope.to, data.gameIds])).rows;
 
-    const { findings, checked } = reconcile({ events, matchRows });
+    const { findings, checked } = reconcile({ events: data.events, matchRows: data.matchRows, outOfSetRows });
     const asOf = new Date().toISOString();
     if (args.format === 'json') {
       process.stdout.write(`${JSON.stringify({ asOf, checked, findings }, null, 2)}\n`);
@@ -178,10 +130,10 @@ async function main() {
       for (const f of findings) {
         process.stdout.write(`* [${f.kind}] ${f.gameId || '(maç kimliği yok)'} — ${f.detail}\n`);
       }
-      if (!findings.length) process.stdout.write('Bulgu yok. Bu, yukarıdaki beş kontrol içindir; '
+      if (!findings.length) process.stdout.write('Bulgu yok. Bu, yukarıdaki kontroller içindir; '
         + 'aynı yanlış değerin iki yere yazılması bu kontrolle görülmez.\n');
     }
-    process.exit(findings.length ? 1 : 0);
+    process.exitCode = findings.length ? 1 : 0;
   } finally {
     await client.end().catch(() => {});
   }

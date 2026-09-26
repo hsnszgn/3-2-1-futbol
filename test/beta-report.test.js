@@ -163,7 +163,9 @@ module.exports = async function run_({ databaseUrl }) {
       events.push(...brokenGame('broken-1'));
       events.push(...unprovenGame('unproven-1'));
 
-      const classified = classifyGames(events, { liveProcesses: new Set() });
+      // matchRows: [] means "the table was read and holds no rows for these
+      // games" — correct here, every game is a guest game whose policy is skip.
+      const classified = classifyGames(events, { liveProcesses: new Set(), matchRows: [] });
       const summary = summarise(classified);
       assert.strictEqual(summary.H, 110, `H is ${summary.H}`);
       assert.deepStrictEqual(summary.counts, { C: 98, V: 10, P: 0, F: 1, U: 1 },
@@ -192,7 +194,7 @@ module.exports = async function run_({ databaseUrl }) {
       // And a window in which the measurement itself broke says so, whatever the
       // games did.
       const degraded = verdict(summarise(classifyGames(
-        Array.from({ length: 120 }, (_, i) => completeGame(`g${i}`)).flat(), {})),
+        Array.from({ length: 120 }, (_, i) => completeGame(`g${i}`)).flat(), { matchRows: [] })),
       { degradedEvents: 1 });
       assert.strictEqual(degraded.status, 'OBSERVABILITY_GAP',
         `a degraded measurement still returned ${degraded.status}`);
@@ -306,6 +308,76 @@ module.exports = async function run_({ databaseUrl }) {
         + 'çelişki raporlandı');
     }
 
+    // --- 5b. one attempt, one scoring — whichever seat ---------------------
+    // Found by review: the check keyed on attempt AND seat, so A +3 and B +3 on
+    // the SAME attempt were two rounds, the finish said 3-3, everything added up,
+    // and 100 such games passed with zero findings. The game resolves an attempt
+    // once, so a second scoring of it is a contradiction on either seat.
+    {
+      const withScores = (gameId, scores) => {
+        const rows = completeGame(gameId).filter((r) => r.event_type !== 'round_scored'
+          && r.event_type !== 'game_finished');
+        const totals = { A: 0, B: 0 };
+        const counted = new Set();
+        scores.forEach(([attempt, seat, eventId], i) => {
+          // An explicit id only when the case is about redelivery; otherwise
+          // event() mints a fresh one.
+          const id = eventId || `${gameId}-score-${i}`;
+          rows.push(event({
+            event_id: id, game_id: gameId, event_type: 'round_scored',
+            attempt_id: attempt, seat, details: { round: 1, points: 3, scored_seat: seat },
+          }));
+          if (!counted.has(id)) { counted.add(id); totals[seat] += 3; }
+        });
+        // The finish agrees with the scored events, so the ONLY thing wrong in
+        // the bad cases is the double scoring itself.
+        rows.push(event({
+          game_id: gameId, event_type: 'game_finished',
+          details: {
+            score_a: totals.A, score_b: totals.B, rounds_played: 1,
+            winner_seat: totals.A === totals.B ? 'draw' : (totals.A > totals.B ? 'A' : 'B'),
+          },
+        }));
+        return rows;
+      };
+      const cases = {
+        // two scorings of attempt 1, different seats: the review's case
+        'two-seats-one-attempt': withScores('two-seats-one-attempt', [[1, 'A'], [1, 'B']]),
+        // two scorings of attempt 1, same seat, different event ids
+        'same-seat-twice': withScores('same-seat-twice', [[1, 'A'], [1, 'A']]),
+        // the SAME event handed over twice: a redelivery, not a second scoring
+        'redelivered': withScores('redelivered', [[1, 'A', 'ev-same'], [1, 'A', 'ev-same']]),
+        // a normal game: A and B each score, on different attempts
+        'normal': withScores('normal', [[1, 'A'], [2, 'B']]),
+      };
+      const got = {};
+      for (const [id, rows] of Object.entries(cases)) {
+        const kinds = reconcile({ events: rows, matchRows: [] }).findings.map((f) => f.kind);
+        const klass = classifyGames(rows, { matchRows: [] }).get(id);
+        got[id] = { kinds, klass: `${klass.klass}:${klass.reason}` };
+      }
+      assert.deepStrictEqual(got['two-seats-one-attempt'].kinds, ['attempt_scored_twice'],
+        `A and B both scored one attempt and reconciliation said ${JSON.stringify(got['two-seats-one-attempt'])}`);
+      assert.strictEqual(got['two-seats-one-attempt'].klass, 'F:attempt_scored_twice');
+      assert.deepStrictEqual(got['same-seat-twice'].kinds, ['attempt_scored_twice']);
+      assert.strictEqual(got['same-seat-twice'].klass, 'F:attempt_scored_twice');
+      assert.deepStrictEqual(got.redelivered.kinds, [], `a redelivery was called a second scoring: ${JSON.stringify(got.redelivered)}`);
+      assert.strictEqual(got.redelivered.klass, 'C:complete');
+      assert.deepStrictEqual(got.normal.kinds, [], `a normal game was flagged: ${JSON.stringify(got.normal)}`);
+      assert.strictEqual(got.normal.klass, 'C:complete');
+      notes.push('aynı denemede A ve B puanı -> attempt_scored_twice, F; aynı koltuk iki kez -> F; '
+        + 'aynı olayın tekrar teslimi -> bulgu yok, C; farklı denemelerde A ve B -> C');
+    }
+
+    // --- 5c. nobody read the table: nothing is complete ------------------
+    {
+      const rows = completeGame('unread', { persist: true });
+      const unread = classifyGames(rows, {}).get('unread');
+      assert.strictEqual(`${unread.klass}:${unread.reason}`, 'U:records_unverified',
+        `a game whose stored row nobody checked was classified ${JSON.stringify(unread)}`);
+      notes.push('matches tablosu okunmadığında biten maç C değil U (records_unverified)');
+    }
+
     // --- 6. the commands, as a reader runs them ---------------------------
     {
       await client.query('TRUNCATE telemetry_events');
@@ -350,7 +422,10 @@ module.exports = async function run_({ databaseUrl }) {
       const integrity = await run(INTEGRITY, ['--cohort', 'beta-01', '--format', 'json'],
         { REPORT_DATABASE_URL: databaseUrl, DATABASE_URL: '' });
       const found = JSON.parse(integrity.stdout);
-      assert.strictEqual(found.checked, 4, `reconciliation looked at ${found.checked} games`);
+      // The SAME game set as the report: selected by start event, human_beta by
+      // default. The automated cli-robot game is outside it — before, the two
+      // commands looked at different sets (4 here vs 3 in the report).
+      assert.strictEqual(found.checked, 3, `reconciliation looked at ${found.checked} games, the report at 3`);
       assert.strictEqual(found.findings.length, 0,
         `clean data produced findings: ${JSON.stringify(found.findings)}`);
       assert.strictEqual(integrity.code, 0);
@@ -359,11 +434,117 @@ module.exports = async function run_({ databaseUrl }) {
         + 'bağlantı adresi olmadan çalışmayı reddetti (adres komut satırında değil, ortamda), '
         + 'uzlaştırma temiz veride bulgu üretmedi');
     }
+    // --- 7. acceptance: the report reads the REAL rows ---------------------
+    // The review's case on a real database: every event says the result was
+    // stored, and the table disagrees. The report must stop calling those games
+    // complete, must not PASS or exit 0 while that is so, and must PASS again
+    // when the rows are right (a positive control, so this cannot pass by the
+    // report simply never passing).
+    {
+      await client.query('TRUNCATE telemetry_events, matches, sessions, players RESTART IDENTITY CASCADE');
+      const players = (await client.query(
+        `INSERT INTO players (username, display_name, password_hash)
+         VALUES ('rapor_a', 'rapor_a', 'x'), ('rapor_b', 'rapor_b', 'x') RETURNING id`)).rows.map((r) => r.id);
+      const ids = ['row-1', 'row-2', 'row-3'];
+      await insert(client, ids.flatMap((id) => completeGame(id, { persist: true })));
+      const writeRows = async () => {
+        await client.query('DELETE FROM matches');
+        for (const id of ids) {
+          await client.query(
+            `INSERT INTO matches (player_a, player_b, score_a, score_b, winner_id, match_uid)
+             VALUES ($1, $2, 3, 1, $1, $3)`, [players[0], players[1], id]);
+        }
+      };
+      const report = async () => {
+        const r = await run(REPORT, ['--cohort', 'beta-01', '--format', 'json', '--min-games', '3'],
+          { REPORT_DATABASE_URL: databaseUrl, DATABASE_URL: '' });
+        return { code: r.code, body: JSON.parse(r.stdout) };
+      };
+
+      await writeRows();
+      const good = await report();
+      assert.strictEqual(good.body.status, 'PASS', `positive control: ${good.body.status} ${good.body.notes}`);
+      assert.strictEqual(good.body.summary.counts.C, 3);
+      assert.strictEqual(good.code, 0);
+
+      await client.query("DELETE FROM matches WHERE match_uid = 'row-2'");
+      const missing = await report();
+      assert.strictEqual(missing.body.summary.counts.C, 2, `a missing row still counted as complete: ${JSON.stringify(missing.body.summary.counts)}`);
+      assert.strictEqual(missing.body.games.find((g) => g.gameId === 'row-2').reason, 'row_missing');
+      assert.notStrictEqual(missing.body.status, 'PASS', 'the report passed with a stored result missing');
+      assert.notStrictEqual(missing.code, 0, 'the report exited 0 with a stored result missing');
+
+      await writeRows();
+      await client.query("UPDATE matches SET score_a = 9 WHERE match_uid = 'row-3'");
+      const changed = await report();
+      assert.strictEqual(changed.body.summary.counts.C, 2);
+      assert.strictEqual(changed.body.games.find((g) => g.gameId === 'row-3').reason, 'row_score_mismatch');
+      assert.notStrictEqual(changed.body.status, 'PASS');
+      assert.notStrictEqual(changed.code, 0);
+
+      await writeRows();
+      const restored = await report();
+      assert.strictEqual(restored.body.status, 'PASS', 'restoring the rows did not restore the pass');
+      assert.strictEqual(restored.code, 0);
+      notes.push('gerçek tablo: satırlar doğruyken PASS/çıkış 0 (C=3); bir satır silinince C=2, row_missing, '
+        + 'PASS yok, çıkış 0 değil; skor değiştirilince row_score_mismatch, PASS yok; satırlar dönünce PASS');
+    }
+
+    // --- 8. both commands connect under the SERVER's TLS policy ------------
+    // Driven through the real command-line entry points. A preloaded module
+    // replaces pg's Client for the child process only: it reads the config the
+    // script built, asks pg's own ConnectionParameters what it would do with it,
+    // prints that and exits — no network connection is opened.
+    {
+      const capture = path.join(__dirname, 'fixtures', 'capture-pg-client.js');
+      const urls = {
+        'password-contains-localhost': 'postgres://audit:containslocalhost@db.example.com/app',
+        'sslmode-no-verify': 'postgres://audit:dummy@db.example.com/app?sslmode=no-verify',
+        'sslmode-disable': 'postgres://audit:dummy@db.example.com/app?sslmode=disable',
+        control: 'postgres://audit:dummy@db.example.com/app',
+      };
+      const results = [];
+      for (const script of [REPORT, INTEGRITY]) {
+        const name = path.basename(script);
+        for (const [label, url] of Object.entries(urls)) {
+          const r = await runWith(['-r', capture, script, '--format', 'json'],
+            { REPORT_DATABASE_URL: url, DATABASE_URL: '', DB_SSL: '' });
+          const line = r.stdout.split('\n').find((l) => l.startsWith('__PG_CLIENT__'));
+          assert.ok(line, `${name} ${label}: no client was built\n${r.stderr}`);
+          const seen = JSON.parse(line.slice('__PG_CLIENT__'.length));
+          assert.strictEqual(seen.host, 'db.example.com', `${name} ${label}: host ${seen.host}`);
+          assert.ok(seen.ssl && seen.ssl.rejectUnauthorized === true,
+            `${name} ${label}: the driver would use ssl=${JSON.stringify(seen.ssl)}`);
+          assert.strictEqual(seen.ssl.servername, 'db.example.com', `${name} ${label}: no host verification`);
+          results.push(`${name}:${label}`);
+        }
+        // An ambiguous target is refused before any client exists.
+        const refused = await runWith(['-r', capture, script, '--format', 'json'],
+          { REPORT_DATABASE_URL: 'postgres://u:dummy@db.example.com/app?host=localhost&host=', DATABASE_URL: '' });
+        assert.strictEqual(refused.code, 2, `${name}: an ambiguous address was not refused (exit ${refused.code})`);
+        assert.ok(!refused.stdout.includes('__PG_CLIENT__'), `${name}: a client was built for an ambiguous address`);
+        assert.ok(/refusing to connect/.test(refused.stderr), refused.stderr);
+      }
+      notes.push(`iki komut da sunucunun TLS politikasıyla bağlanıyor (${results.length} vaka: paroladaki "localhost", `
+        + 'sslmode=no-verify ve sslmode=disable uzak hedefte doğrulamayı kapatamadı, servername=db.example.com); '
+        + 'muğlak adreste ikisi de istemci kurmadan çıkış 2');
+    }
   } finally {
     await client.end().catch(() => {});
   }
 
   return notes.join(' · ');
 };
+
+function runWith(nodeArgs, env) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, nodeArgs, { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
 
 module.exports.needsDatabase = true;

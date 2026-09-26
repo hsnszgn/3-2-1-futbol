@@ -29,6 +29,22 @@
 
 const { Client } = require('pg');
 const { classifyGames, summarise, verdict } = require('../server/betaMetrics');
+// The server's TLS policy, from the module that has no side effects. The first
+// version of this script had its own copy of the OLD rule — a regex over the
+// whole URL (so a password containing "localhost" switched TLS off for a remote
+// host) and no removal of sslmode (so ?sslmode=no-verify switched verification
+// off). Review found both holes open again here.
+const { sslConfigFor } = require('../server/dbTls');
+
+/**
+ * The pg client configuration for a report connection: exactly the server's TLS
+ * decision. Throws for an address whose target is ambiguous — the caller exits
+ * rather than connecting somewhere it cannot vouch for.
+ */
+function clientConfig(url, env = process.env) {
+  const cfg = sslConfigFor(url, env);
+  return { connectionString: cfg.connectionString, ssl: cfg.ssl };
+}
 
 function parseArgs(argv) {
   const args = { format: 'markdown' };
@@ -40,6 +56,24 @@ function parseArgs(argv) {
     args[key] = value;
   }
   return args;
+}
+
+/**
+ * The game set both commands work on. One function, so the report and the
+ * reconciliation cannot quietly look at two different windows.
+ */
+function scopeFromArgs(args) {
+  return {
+    asOf: new Date().toISOString(),
+    from: isoOrNull(args.from, 'from'),
+    to: isoOrNull(args.to, 'to'),
+    cohort: args.cohort || null,
+    release: args.release || null,
+    environment: args.environment || null,
+    // Only real beta traffic counts towards H. Overridable for inspection, but
+    // the default is the one the gate is about.
+    trafficKind: args['traffic-kind'] || 'human_beta',
+  };
 }
 
 function isoOrNull(value, label) {
@@ -63,7 +97,7 @@ async function collect(client, { from, to, cohort, release, environment, traffic
         AND ($6::text IS NULL OR environment = $6)
         AND game_id IS NOT NULL`,
     [trafficKind, from, to, cohort, release, environment]);
-  const gameIds = started.rows.map((r) => r.game_id);
+  const gameIds = [...new Set(started.rows.map((r) => r.game_id))];
 
   const events = gameIds.length
     ? (await client.query(
@@ -96,8 +130,21 @@ async function collect(client, { from, to, cohort, release, environment, traffic
         AND ($2::timestamptz IS NULL OR server_occurred_at < $2)
       GROUP BY reason_code ORDER BY reason_code`, [from, to]);
 
+  // The stored results for exactly these games. Without them no game can be C:
+  // "the row the policy called for is there" is part of C, and the first version
+  // of this report decided it from the match_persisted EVENT and never read the
+  // table — with every row missing it said PASS with C=100. If this query fails,
+  // collect() throws and the report is an OBSERVABILITY_GAP, not a pass.
+  const matchRows = gameIds.length
+    ? (await client.query(
+      `SELECT id, match_uid, player_a, player_b, score_a, score_b, winner_id, played_at
+         FROM matches WHERE match_uid = ANY($1)`, [gameIds])).rows
+    : [];
+
   return {
+    gameIds,
     events,
+    matchRows,
     liveProcesses,
     degradedEvents: degraded.rows[0].n,
     recovery: recovery.rows,
@@ -167,22 +214,16 @@ async function main() {
     process.exit(2);
   }
 
-  const scope = {
-    asOf: new Date().toISOString(),
-    from: isoOrNull(args.from, 'from'),
-    to: isoOrNull(args.to, 'to'),
-    cohort: args.cohort || null,
-    release: args.release || null,
-    environment: args.environment || null,
-    // Only real beta traffic counts towards H. Overridable for inspection, but
-    // the default is the one the gate is about.
-    trafficKind: args['traffic-kind'] || 'human_beta',
-  };
+  const scope = scopeFromArgs(args);
 
-  const client = new Client({
-    connectionString: url,
-    ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: true },
-  });
+  let config;
+  try {
+    config = clientConfig(url);
+  } catch (err) {
+    console.error(`refusing to connect: ${err.message}`);
+    process.exit(2);
+  }
+  const client = new Client(config);
 
   let data = null;
   let queryFailed = false;
@@ -197,7 +238,8 @@ async function main() {
     await client.end().catch(() => {});
   }
 
-  const classified = data ? classifyGames(data.events, { liveProcesses: data.liveProcesses })
+  const classified = data
+    ? classifyGames(data.events, { liveProcesses: data.liveProcesses, matchRows: data.matchRows })
     : new Map();
   const summary = summarise(classified);
   const decision = verdict(summary, {
@@ -247,4 +289,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, collect, markdown };
+module.exports = { parseArgs, collect, markdown, clientConfig, scopeFromArgs };

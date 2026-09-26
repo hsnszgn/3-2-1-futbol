@@ -34,6 +34,109 @@ const FINAL_TYPES = new Set(['game_finished', 'game_aborted']);
 const TECHNICAL_ABORTS = new Set(['recovery_expired', 'room_gone', 'server_error', 'shutdown']);
 
 /**
+ * Everything that can be wrong with one finished game, as findings.
+ *
+ * Two severities, and the difference decides the class:
+ *   fault     the evidence CONTRADICTS a correct result — the game is F.
+ *   evidence  the evidence is INCOMPLETE — the game is U, never C.
+ *
+ * @param {object[]} rows every event of ONE game
+ * @param {{matchRow?: object, recordsChecked: boolean}} records the stored
+ *   result for this game, and whether anyone actually read the table.
+ * @returns {{kind: string, severity: 'fault'|'evidence', detail: string}[]}
+ */
+function gameFindings(rows, { matchRow, recordsChecked }) {
+  const findings = [];
+  const add = (kind, severity, detail) => findings.push({ kind, severity, detail });
+
+  // A redelivered event is one event: the database already keeps one row per
+  // event id, but a caller may hand over the same row twice.
+  const seen = new Set();
+  const unique = rows.filter((r) => (seen.has(r.event_id) ? false : seen.add(r.event_id)));
+
+  const finished = unique.filter((r) => r.event_type === 'game_finished');
+  if (!finished.length) return findings;
+  if (finished.length > 1) {
+    const distinct = new Set(finished.map((f) => JSON.stringify([
+      (f.details || {}).score_a, (f.details || {}).score_b, (f.details || {}).winner_seat])));
+    add(distinct.size > 1 ? 'conflicting_results' : 'duplicate_result', 'fault',
+      `${finished.length} game_finished olayı, ${distinct.size} farklı sonuç`);
+  }
+  const result = finished[0].details || {};
+
+  // One attempt, one scoring — whichever seat. The game resolves an attempt
+  // once (playerGuessResolved), so a second round_scored for the same attempt
+  // is a contradiction even when it names the OTHER seat. The first version
+  // keyed this check on attempt AND seat, so A +3 and B +3 on the same attempt
+  // looked like two different rounds, added up to 3-3, and passed.
+  const scored = unique.filter((r) => r.event_type === 'round_scored');
+  const byAttempt = new Map();
+  for (const row of scored) {
+    if (!Number.isInteger(row.attempt_id)) {
+      add('attempt_missing', 'evidence', `puan olayı ${row.event_id} bir denemeye bağlı değil`);
+      continue;
+    }
+    if (!byAttempt.has(row.attempt_id)) byAttempt.set(row.attempt_id, []);
+    byAttempt.get(row.attempt_id).push(row);
+  }
+  const totals = { A: 0, B: 0 };
+  for (const [attempt, list] of byAttempt) {
+    if (list.length > 1) {
+      const seats = list.map((r) => (r.details && r.details.scored_seat) || r.seat).join('+');
+      add('attempt_scored_twice', 'fault', `deneme ${attempt} ${list.length} kez puanlandı (${seats})`);
+    }
+    for (const row of list) {
+      const seat = (row.details && row.details.scored_seat) || row.seat;
+      const points = Number((row.details && row.details.points) || 0);
+      if (seat === 'A' || seat === 'B') totals[seat] += points;
+    }
+  }
+  if (Number(result.score_a) !== totals.A || Number(result.score_b) !== totals.B) {
+    add('score_mismatch', 'fault', `turlar ${totals.A}-${totals.B}, sonuç ${result.score_a}-${result.score_b}`);
+  }
+  const derivedWinner = totals.A === totals.B ? 'draw' : (totals.A > totals.B ? 'A' : 'B');
+  if ((result.winner_seat || 'draw') !== derivedWinner) {
+    add('winner_mismatch', 'fault', `skordan türeyen ${derivedWinner}, olaydaki ${result.winner_seat || 'draw'}`);
+  }
+
+  // The recording: what the policy decided, and what is actually stored.
+  const decided = unique.find((r) => r.event_type === 'recording_decided');
+  const persisted = unique.find((r) => r.event_type === 'match_persisted');
+  const persistFailed = unique.find((r) => r.event_type === 'match_persist_failed');
+  if (!decided) {
+    add('recording_decision_missing', 'evidence', 'kayıt kararı olayı yok');
+    return findings;
+  }
+  const expectPersist = (decided.details || {}).decision === 'persist';
+  if (!recordsChecked) {
+    // Not "fine": unverified. A match_persisted event says the server THOUGHT
+    // it wrote the row; only the table says it is there.
+    add('records_unverified', 'evidence', 'matches tablosu okunmadı; kayıt doğrulanamadı');
+    return findings;
+  }
+  if (expectPersist && !matchRow) {
+    add(persistFailed ? 'persist_failed' : 'row_missing', 'fault',
+      persistFailed ? `kayıt hatası: ${(persistFailed.details || {}).error_kind}` : 'beklenen satır yok');
+  } else if (!expectPersist && matchRow) {
+    add('unexpected_row', 'fault', `politika "${decided.reason_code}" diyor ama satır var (id ${matchRow.id})`);
+  } else if (expectPersist && matchRow) {
+    if (!persisted) add('persist_event_missing', 'evidence', 'satır var, match_persisted olayı yok');
+    const rowWinner = matchRow.winner_id === null || matchRow.winner_id === undefined ? 'draw'
+      : matchRow.winner_id === matchRow.player_a ? 'A'
+        : matchRow.winner_id === matchRow.player_b ? 'B' : 'other';
+    if (Number(matchRow.score_a) !== Number(result.score_a)
+      || Number(matchRow.score_b) !== Number(result.score_b)) {
+      add('row_score_mismatch', 'fault',
+        `satır ${matchRow.score_a}-${matchRow.score_b}, olay ${result.score_a}-${result.score_b}`);
+    }
+    if (rowWinner !== (result.winner_seat || 'draw')) {
+      add('row_winner_mismatch', 'fault', `satır ${rowWinner}, olay ${result.winner_seat || 'draw'}`);
+    }
+  }
+  return findings;
+}
+
+/**
  * Groups events by game and works out what happened to each one.
  *
  * @param {object[]} events rows from telemetry_events, any order
@@ -43,7 +146,14 @@ const TECHNICAL_ABORTS = new Set(['recovery_expired', 'room_gone', 'server_error
  *   process is gone is not, and must not be counted as anything but unknown.
  * @returns {Map<string, object>} game id → { klass, reason, evidence }
  */
-function classifyGames(events, { liveProcesses = new Set() } = {}) {
+function classifyGames(events, { liveProcesses = new Set(), matchRows } = {}) {
+  // The stored results, read by the caller for exactly the games being
+  // classified. `undefined` means NOBODY LOOKED — and then no finished game can
+  // be C, because C includes "the row the policy called for is there". The first
+  // version decided that from the match_persisted EVENT alone and never read the
+  // table: with every row missing, the report said PASS with C=100.
+  const recordsChecked = Array.isArray(matchRows);
+  const rowsByUid = new Map((matchRows || []).map((row) => [row.match_uid, row]));
   const byGame = new Map();
   for (const event of events) {
     if (!event.game_id) continue;
@@ -58,18 +168,14 @@ function classifyGames(events, { liveProcesses = new Set() } = {}) {
     if (!started) continue; // a game the window does not own; the caller filtered by start
     const finished = rows.find((r) => r.event_type === 'game_finished');
     const aborted = rows.find((r) => r.event_type === 'game_aborted');
-    const scored = rows.filter((r) => r.event_type === 'round_scored');
     const rendered = new Set(rows.filter((r) => r.event_type === 'result_rendered' && r.source === 'client')
       .map((r) => r.seat).filter(Boolean));
-    const decided = rows.find((r) => r.event_type === 'recording_decided');
-    const persisted = rows.find((r) => r.event_type === 'match_persisted');
-    const persistFailed = rows.find((r) => r.event_type === 'match_persist_failed');
     const disconnects = rows.filter((r) => r.event_type === 'disconnect_observed');
     const errors = rows.filter((r) => r.event_type.endsWith('_error'));
 
     const evidence = {
       seatsRendered: [...rendered].sort(),
-      rounds: scored.length,
+      rounds: rows.filter((r) => r.event_type === 'round_scored').length,
       disconnects: disconnects.length,
       errors: errors.length,
       processInstance: started.process_instance_id,
@@ -115,32 +221,16 @@ function classifyGames(events, { liveProcesses = new Set() } = {}) {
       continue;
     }
 
-    // Finished. Now the three checks that decide C.
-    const details = finished.details || {};
-    const totals = { A: 0, B: 0 };
-    for (const row of scored) {
-      const seat = (row.details && row.details.scored_seat) || row.seat;
-      const points = Number((row.details && row.details.points) || 0);
-      if (seat === 'A' || seat === 'B') totals[seat] += points;
-    }
-    const scoresAgree = Number(details.score_a) === totals.A && Number(details.score_b) === totals.B;
-    const expectedWinner = totals.A === totals.B ? 'draw' : (totals.A > totals.B ? 'A' : 'B');
-    const winnerAgrees = (details.winner_seat || 'draw') === expectedWinner;
+    // Finished. Every consistency check lives in gameFindings(), which the
+    // reconciliation command runs too — one definition, so the report cannot
+    // call a game complete that reconciliation would flag.
+    const findings = gameFindings(rows, { matchRow: rowsByUid.get(gameId), recordsChecked });
     const bothRendered = rendered.has('A') && rendered.has('B');
-    const persistExpected = decided ? (decided.details || {}).decision === 'persist' : false;
-    const persistOk = persistExpected ? Boolean(persisted) && !persistFailed : !persistFailed;
+    evidence.findings = findings.map((f) => f.kind);
 
-    evidence.scoresAgree = scoresAgree;
-    evidence.winnerAgrees = winnerAgrees;
-    evidence.persistExpected = persistExpected;
-    evidence.persistOk = persistOk;
-
-    if (!scoresAgree || !winnerAgrees || !persistOk) {
-      out.set(gameId, {
-        klass: 'F',
-        reason: !scoresAgree ? 'score_mismatch' : !winnerAgrees ? 'winner_mismatch' : 'persist_failed',
-        evidence,
-      });
+    const fault = findings.find((f) => f.severity === 'fault');
+    if (fault) {
+      out.set(gameId, { klass: 'F', reason: fault.kind, evidence });
       continue;
     }
     if (!bothRendered) {
@@ -150,8 +240,9 @@ function classifyGames(events, { liveProcesses = new Set() } = {}) {
       out.set(gameId, { klass: 'U', reason: 'result_screen_unconfirmed', evidence });
       continue;
     }
-    if (!decided) {
-      out.set(gameId, { klass: 'U', reason: 'recording_decision_missing', evidence });
+    const missing = findings.find((f) => f.severity === 'evidence');
+    if (missing) {
+      out.set(gameId, { klass: 'U', reason: missing.kind, evidence });
       continue;
     }
     out.set(gameId, { klass: 'C', reason: 'complete', evidence });
@@ -246,4 +337,4 @@ function verdict(summary, {
   return { status: 'PASS', notes };
 }
 
-module.exports = { classifyGames, summarise, verdict, CLASSES, FINAL_TYPES, TECHNICAL_ABORTS };
+module.exports = { classifyGames, gameFindings, summarise, verdict, CLASSES, FINAL_TYPES, TECHNICAL_ABORTS };

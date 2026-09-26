@@ -251,6 +251,12 @@ npm run beta:integrity -- --cohort beta-01
 ```
 
 Tarihler örnektir. PASS dışındaki her sonuç sıfır dışı çıkış koduyla biter.
+İki komut **aynı maç kümesine** bakar (başlangıç olayına göre `[from, to)`, aynı
+grup/sürüm/ortam/trafik türü filtreleri; `--traffic-kind` varsayılanı `human_beta`).
+Rapor, kaydedilmesi gereken maçların `matches` satırlarını **gerçekten okur**: satır
+yoksa veya skoru/kazananı olayla uyuşmuyorsa o maç tamamlandı sayılmaz. Bağlantı,
+sunucuyla aynı TLS politikasıyla kurulur (`server/dbTls.js`); hedefi muğlak bir adres
+reddedilir.
 Raporun neyi kanıtlamadığı kendi çıktısında yazılıdır (aynı yanlış skorun iki yere
 yazılması, "gerçek insan" tespiti, `P` sınıfının yaklaşıklığı).
 
