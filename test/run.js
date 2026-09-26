@@ -39,7 +39,7 @@ async function resetDatabase() {
   await client.connect();
   await client.query(SCHEMA);
   try {
-    await client.query('TRUNCATE matches, sessions, players RESTART IDENTITY CASCADE');
+    await client.query('TRUNCATE matches, sessions, players, telemetry_events RESTART IDENTITY CASCADE');
   } catch (err) {
     // On a first run the tables do not exist yet, which is fine. Anything else
     // means the test is about to run against leftover rows, and swallowing it

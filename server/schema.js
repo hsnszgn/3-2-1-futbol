@@ -78,4 +78,44 @@ module.exports = `
   -- Rows written before this column existed have NULL, and Postgres allows any
   -- number of NULLs in a unique index, so no back-fill is needed.
   CREATE UNIQUE INDEX IF NOT EXISTS matches_match_uid_key ON matches(match_uid);
+
+  -- Measurement events (roadmap M1). A separate table on purpose: it covers
+  -- GUEST games too, which never reach the matches table, so a game that is not on the
+  -- leaderboard is still in the denominator. Nothing in here identifies a
+  -- person: no username, no IP, no answer text, and above all no token,
+  -- password or connection string — see the allow-list in server/telemetry.js.
+  CREATE TABLE IF NOT EXISTS telemetry_events (
+    event_id            TEXT PRIMARY KEY,
+    schema_version      INTEGER NOT NULL,
+    event_type          TEXT NOT NULL,
+    game_id             TEXT,
+    attempt_id          INTEGER,
+    -- Which side of the board, not which account: 'A' or 'B'.
+    seat                TEXT,
+    -- When the server says it happened, and when the row landed. Two columns
+    -- because queue lag must be measurable without moving the event itself.
+    server_occurred_at  TIMESTAMPTZ NOT NULL,
+    stored_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    environment         TEXT NOT NULL,
+    -- human_beta / automated / manual_qa, assigned by server configuration. A
+    -- client cannot label its own traffic as real beta play.
+    traffic_kind        TEXT NOT NULL,
+    beta_cohort_id      TEXT,
+    release_sha         TEXT,
+    process_instance_id TEXT NOT NULL,
+    -- 'server' (what the server did) or 'client' (what a screen reported). The
+    -- report treats them as different classes of evidence.
+    source              TEXT NOT NULL,
+    reason_code         TEXT,
+    details             JSONB NOT NULL DEFAULT '{}'::jsonb
+  );
+
+  -- The report's two shapes: everything about one game, and everything in a
+  -- window for one cohort.
+  CREATE INDEX IF NOT EXISTS telemetry_events_game_idx
+    ON telemetry_events(game_id, server_occurred_at);
+  CREATE INDEX IF NOT EXISTS telemetry_events_window_idx
+    ON telemetry_events(event_type, server_occurred_at);
+  CREATE INDEX IF NOT EXISTS telemetry_events_cohort_idx
+    ON telemetry_events(beta_cohort_id, server_occurred_at);
 `;
