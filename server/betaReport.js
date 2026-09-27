@@ -89,13 +89,25 @@ async function collect(client, { from, to, cohort, release, environment, traffic
   // window and a little before it — a heartbeat just before `from` covers the
   // start of the window.
   const evidenceFrom = from ? new Date(from.getTime() - 3 * 24 * 60 * 60 * 1000) : null;
+  //
+  // Scoped to the SAME target as the games: environment, release and cohort. The
+  // first version selected evidence by time alone, so a release with no
+  // heartbeats at all passed its 72 hours on another release's heartbeats. The
+  // measurement's own fault events are NOT narrowed: they share the database,
+  // and a fault anywhere in the window is reason enough not to vouch for it.
   const evidence = (await client.query(
-    `SELECT event_type, server_occurred_at, details FROM telemetry_events
-      WHERE event_type IN ('telemetry_heartbeat', 'process_started', 'process_stopping',
-                           'telemetry_degraded', 'telemetry_conflict')
-        AND ($1::timestamptz IS NULL OR server_occurred_at >= $1)
+    `SELECT event_type, server_occurred_at, details, environment, release_sha, beta_cohort_id,
+            process_instance_id
+       FROM telemetry_events
+      WHERE ($1::timestamptz IS NULL OR server_occurred_at >= $1)
         AND ($2::timestamptz IS NULL OR server_occurred_at < $2)
-      ORDER BY server_occurred_at`, [evidenceFrom, to])).rows;
+        AND (
+          (event_type IN ('telemetry_heartbeat', 'process_started', 'process_stopping')
+            AND ($3::text IS NULL OR environment = $3)
+            AND ($4::text IS NULL OR release_sha = $4)
+            AND ($5::text IS NULL OR beta_cohort_id = $5))
+          OR event_type IN ('telemetry_degraded', 'telemetry_conflict'))
+      ORDER BY server_occurred_at`, [evidenceFrom, to, environment, release, cohort])).rows;
 
   return {
     gameIds,
@@ -108,12 +120,16 @@ async function collect(client, { from, to, cohort, release, environment, traffic
 }
 
 
-/** The heartbeat interval the server said it used; the configured default otherwise. */
+/**
+ * The interval a window is judged at: the SMALLEST one the target's heartbeats
+ * recorded, or the configured default. The first version took the largest, so
+ * one slow-beating process relaxed the rule for every other.
+ */
 function heartbeatIntervalOf(evidence, fallbackMs = DEFAULT_HEARTBEAT_MS) {
   const recorded = evidence
     .filter((e) => e.event_type === 'telemetry_heartbeat' && e.details && Number(e.details.interval_ms) > 0)
     .map((e) => Number(e.details.interval_ms));
-  return recorded.length ? Math.max(...recorded) : fallbackMs;
+  return recorded.length ? Math.min(...recorded) : fallbackMs;
 }
 
 /**

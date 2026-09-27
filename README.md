@@ -240,6 +240,7 @@ ham olaylar 30, saklanan raporlar 90 gün sonra sunucu tarafından silinir
 | `RELEASE_SHA` | Çalışan sürüm (Render'da `RENDER_GIT_COMMIT` kendiliğinden okunur). |
 | `TELEMETRY_HEARTBEAT_MS` | Kalp atışı aralığı (varsayılan 5 dk). 72 saatlik gözlem bu kanıtla yargılanır. |
 | `BETA_ALERT_WEBHOOK_URL` | Alarmların gideceği webhook; yalnız HTTPS (veya aynı makine). Yoksa alarmlar NOT_CONFIGURED olarak saklanır. |
+| `BETA_ALERT_RETRY_BASE_MS` / `BETA_ALERT_MAX_ATTEMPTS` | Gönderilemeyen alarmın ilk yeniden deneme beklemesi (varsayılan 1 dk, her denemede iki katı, en çok 1 sa) ve deneme sınırı (varsayılan 24); sınırda `DELIVERY_ABANDONED` saklanır ve loglanır. |
 | `BETA_ALERT_INTERVAL_MS` / `BETA_REPORT_INTERVAL_MS` | Alarm kontrolü (varsayılan 5 dk) ve saklanan rapor (varsayılan 24 sa) aralığı. |
 | `TELEMETRY_REQUIRE_DURABLE_START=1` | Maçın başlangıcı veritabanına yazılamazsa maç başlatılmaz, oyunculara söylenir. Yalnız ölçüm açıkken geçerli. |
 

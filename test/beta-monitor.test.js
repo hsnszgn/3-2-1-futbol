@@ -18,6 +18,7 @@ const { Client } = require('pg');
 const { observe } = require('../server/observation');
 const { buildReport } = require('../server/betaReport');
 const alerts = require('../server/alerts');
+const { runAlerts } = require('../server/betaMonitor');
 const { startTestServer, waitForAccounts } = require('./helpers');
 
 const MIN = 60 * 1000;
@@ -206,8 +207,46 @@ module.exports = async function run({ databaseUrl }) {
       assert.strictEqual(failed.status, 'OBSERVABILITY_GAP');
       assert.strictEqual(failed.queryFailed, true);
       assert.strictEqual(failed.gate, 'NOT_PASSED');
+      // Evidence belongs to its target. Found by review: evidence was selected by
+      // time alone, so a release with ZERO heartbeats passed its 72 hours on
+      // another release's heartbeats.
+      const targeted = { from, to, cohort: 'mon', release: 'mon-sha', environment: 'beta', trafficKind: 'human_beta' };
+      const otherRelease = (rows) => rows.map((r) => ({ ...r, release_sha: 'other-sha', process_instance_id: 'other-proc' }));
+      await reset();
+      await insert(db, [...games, ...otherRelease(heartbeats(new Date(from.getTime() - 5 * MIN), to, 5 * MIN))]);
+      const borrowed = await buildReport(db, targeted, opts);
+      assert.notStrictEqual(borrowed.gate, 'PASS', 'another release\'s heartbeats passed this release\'s 72 hours');
+      assert.notStrictEqual(borrowed.status, 'PASS');
+
+      // The target's own, complete heartbeats: passes (positive control).
+      await reset();
+      await insert(db, [...games, ...heartbeats(new Date(from.getTime() - 5 * MIN), to, 5 * MIN)]);
+      assert.strictEqual((await buildReport(db, targeted, opts)).gate, 'PASS', 'the target\'s own heartbeats did not pass');
+
+      // A hole in the target's heartbeats, filled by another release: still a gap.
+      const hole = [new Date(from.getTime() + 30 * HOUR), new Date(from.getTime() + 31 * HOUR)];
+      await reset();
+      await insert(db, [...games,
+        ...heartbeats(new Date(from.getTime() - 5 * MIN), to, 5 * MIN, [hole]),
+        ...otherRelease(heartbeats(hole[0], hole[1], 5 * MIN))]);
+      const filled = await buildReport(db, targeted, opts);
+      assert.strictEqual(filled.status, 'OBSERVABILITY_GAP', `another release filled this release's gap: ${filled.status}`);
+
+      // A hole covered only by a SAME-release process beating hourly: the slow
+      // beat must not vouch for the five-minute rule. Found by review: the
+      // largest recorded interval was spread over the whole window.
+      await reset();
+      await insert(db, [...games,
+        ...heartbeats(new Date(from.getTime() - 5 * MIN), to, 5 * MIN, [hole]),
+        ...heartbeats(new Date(hole[0].getTime() - 30 * MIN), hole[1], HOUR)
+          .map((r) => ({ ...r, process_instance_id: 'slow-proc' }))]);
+      const slow = await buildReport(db, targeted, opts);
+      assert.strictEqual(slow.status, 'OBSERVABILITY_GAP', `an hourly beat hid a one-hour gap: ${slow.status}`);
+
       notes.push('rapor: 3 temiz maç + kesintisiz kalp atışı PASS/gate PASS (pozitif kontrol); bir saatlik boşluk, hiç kalp atışı, '
-        + 'ölçüm arızası, maç olmayan pencere (NO_USAGE) ve başarısız sorgu — hiçbiri PASS değil');
+        + 'ölçüm arızası, maç olmayan pencere (NO_USAGE) ve başarısız sorgu — hiçbiri PASS değil · kanıt hedefe ait: yalnız başka '
+        + 'sürümün atışları, başka sürümün doldurduğu delik ve aynı sürümde saatlik atan sürecin örttüğü delik PASS değil; hedefin '
+        + 'kendi tam atışları PASS');
     }
 
     // --- 3. alerts, against a local receiver -------------------------------
@@ -306,6 +345,92 @@ module.exports = async function run({ databaseUrl }) {
       }
     }
 
+    // --- 3b. the scheduler's alert path: outbox, back-off, cap, long crash ----
+    {
+      const hook = await receiver();
+      const saved = { ...process.env };
+      Object.assign(process.env, {
+        BETA_ALERT_WEBHOOK_URL: hook.url, BETA_ALERT_RETRY_BASE_MS: '60000', BETA_ALERT_MAX_ATTEMPTS: '24',
+      });
+      const settings = { alertLookbackMs: HOUR, heartbeatMs: 5 * MIN, settleMs: 0 };
+      try {
+        // A failed alert whose problem has left the detection window. Found by
+        // review: only re-detected problems were redelivered, so this was never
+        // sent. Driven through runAlerts — the path the scheduler uses — and not
+        // by handing the same array back to deliver().
+        await reset();
+        const now = new Date();
+        await insert(db, [ev({ event_type: 'telemetry_degraded', process_instance_id: 'outbox-proc',
+          server_occurred_at: new Date(now.getTime() - 5 * MIN), details: { fault: 'queue_overflow' } })]);
+        hook.fail(503);
+        const first = await runAlerts(db, settings, now);
+        assert.deepStrictEqual(first.map((o) => o.status), ['DELIVERY_FAILED']);
+        hook.fail(0);
+        // Inside the back-off: not retried yet.
+        const early = await runAlerts(db, settings, new Date(now.getTime() + 30 * 1000));
+        assert.deepStrictEqual(early.map((o) => o.status), ['RETRY_WAIT']);
+        // Two hours later the problem is long out of the window; the outbox still has it.
+        const later = new Date(now.getTime() + 2 * HOUR);
+        assert.strictEqual((await alerts.evaluate(db, { ...settings, now: later, lookbackMs: HOUR })).length, 0,
+          'control: the problem should be outside the detection window by now');
+        const retried = await runAlerts(db, settings, later);
+        assert.deepStrictEqual(retried.map((o) => o.status), ['SENT'], `outbox: ${JSON.stringify(retried)}`);
+        assert.deepStrictEqual(hook.received.map((a) => a.key), ['measurement:outbox-proc:queue_overflow']);
+        // And never again.
+        const after = await runAlerts(db, settings, new Date(later.getTime() + HOUR));
+        assert.strictEqual(after.length, 0, `a delivered alert came back: ${JSON.stringify(after)}`);
+        assert.strictEqual(hook.received.length, 1);
+
+        // A channel that never recovers: bounded, and the end is visible.
+        await reset();
+        hook.received.length = 0;
+        process.env.BETA_ALERT_RETRY_BASE_MS = '1';
+        process.env.BETA_ALERT_MAX_ATTEMPTS = '3';
+        await insert(db, [ev({ event_type: 'telemetry_degraded', process_instance_id: 'dead-channel',
+          server_occurred_at: new Date(now.getTime() - 5 * MIN), details: { fault: 'write_failed' } })]);
+        hook.fail(500);
+        const statuses = [];
+        for (let i = 0; i < 6; i += 1) {
+          statuses.push(...(await runAlerts(db, settings, new Date(now.getTime() + i * 1000))).map((o) => o.status));
+        }
+        assert.deepStrictEqual(statuses,
+          ['DELIVERY_FAILED', 'DELIVERY_FAILED', 'DELIVERY_FAILED', 'DELIVERY_ABANDONED', 'SUPPRESSED', 'SUPPRESSED'],
+          `retry policy: ${statuses.join(', ')}`);
+        hook.fail(0);
+        process.env.BETA_ALERT_RETRY_BASE_MS = '60000';
+        process.env.BETA_ALERT_MAX_ATTEMPTS = '24';
+
+        // A crash two hours before the restart. Found by review: crashes were
+        // looked for in the last hour only, so a long outage raised nothing.
+        await reset();
+        hook.received.length = 0;
+        await insert(db, [
+          ev({ event_type: 'process_started', process_instance_id: 'dead', server_occurred_at: new Date(now.getTime() - 3 * HOUR) }),
+          ev({ event_type: 'telemetry_heartbeat', process_instance_id: 'dead', server_occurred_at: new Date(now.getTime() - 2 * HOUR), details: { interval_ms: 5 * MIN } }),
+          // a planned stop long ago: must not be a crash
+          ev({ event_type: 'process_started', process_instance_id: 'planned', server_occurred_at: new Date(now.getTime() - 5 * HOUR) }),
+          ev({ event_type: 'process_stopping', process_instance_id: 'planned', server_occurred_at: new Date(now.getTime() - 4 * HOUR) }),
+          ev({ event_type: 'process_started', process_instance_id: 'replacement', server_occurred_at: new Date(now.getTime() - MIN) }),
+          ev({ event_type: 'telemetry_heartbeat', process_instance_id: 'replacement', server_occurred_at: new Date(now.getTime() - MIN), details: { interval_ms: 5 * MIN } }),
+        ]);
+        const long = await runAlerts(db, settings, now);
+        assert.deepStrictEqual(long.map((o) => `${o.key}:${o.status}`), ['crash:dead:SENT'],
+          `after a two-hour outage: ${JSON.stringify(long)}`);
+        const again = await runAlerts(db, settings, new Date(now.getTime() + 10 * MIN));
+        assert.ok(again.every((o) => o.status === 'SUPPRESSED'), `the crash was re-sent: ${JSON.stringify(again)}`);
+        assert.strictEqual(hook.received.filter((a) => a.key === 'crash:dead').length, 1);
+
+        notes.push('zamanlayıcının alarm yolu: başarısız alarm tespit penceresinden çıktıktan sonra kalıcı bekleyen kuyruktan '
+          + 'gönderildi (önce geri çekilme süresinde bekledi), sonra bir daha gelmedi; hiç düzelmeyen kanalda 3 denemeden sonra '
+          + 'DELIVERY_ABANDONED kaydedildi ve durdu; iki saatlik çöküş yeniden başlatmada tek alarm üretti, planlı kapanış üretmedi');
+      } finally {
+        for (const k of ['BETA_ALERT_WEBHOOK_URL', 'BETA_ALERT_RETRY_BASE_MS', 'BETA_ALERT_MAX_ATTEMPTS']) {
+          if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k];
+        }
+        await hook.close();
+      }
+    }
+
     // --- 4. the scheduler, run for real ------------------------------------
     {
       await reset();
@@ -391,6 +516,53 @@ module.exports = async function run({ databaseUrl }) {
         await third.stop();
         await hook.close();
       }
+      // The outbox across a restart, on real servers: an alert fails while the
+      // channel is down, the process is killed, the problem leaves the
+      // detection window, the channel recovers — and the NEXT process delivers it.
+      {
+        await reset();
+        const hook2 = await receiver();
+        const env2 = {
+          ...env, BETA_ALERT_WEBHOOK_URL: hook2.url, BETA_ALERT_LOOKBACK_MS: '1500', BETA_ALERT_RETRY_BASE_MS: '200',
+        };
+        hook2.fail(503);
+        const before = await startTestServer(env2);
+        try {
+          await waitForAccounts(before);
+          await insert(db, [ev({ event_type: 'telemetry_degraded', process_instance_id: 'restart-proc',
+            server_occurred_at: new Date(), details: { fault: 'write_failed' } })]);
+          let failed = 0;
+          for (let i = 0; i < 50 && !failed; i += 1) {
+            await sleep(100);
+            failed = (await db.query(`SELECT count(*)::int AS n FROM telemetry_reports WHERE kind = 'alert'
+              AND status = 'DELIVERY_FAILED' AND body->>'key' = 'measurement:restart-proc:write_failed'`)).rows[0].n;
+          }
+          assert.ok(failed >= 1, 'the alert never reached a failed delivery');
+        } finally {
+          await before.stop();
+        }
+        hook2.fail(0);
+        await sleep(2000); // now outside the 1.5 s detection window
+        const afterRestart = await startTestServer(env2);
+        try {
+          await waitForAccounts(afterRestart);
+          let got = [];
+          for (let i = 0; i < 50 && !got.length; i += 1) {
+            await sleep(100);
+            got = hook2.received.filter((a) => a.key === 'measurement:restart-proc:write_failed');
+          }
+          assert.strictEqual(got.length, 1, 'a pending alert was not delivered after the restart');
+          await sleep(1000);
+          assert.strictEqual(hook2.received.filter((a) => a.key === 'measurement:restart-proc:write_failed').length, 1,
+            'the pending alert was delivered more than once');
+        } finally {
+          await afterRestart.stop();
+          await hook2.close();
+        }
+      }
+
+      notes.push('yeniden başlatma: kanal kapalıyken başarısız olan alarm, süreç öldürülüp sorun tespit penceresinden çıktıktan sonra '
+        + 'bir sonraki süreç tarafından bir kez teslim edildi');
       notes.push('zamanlayıcı gerçekten koştu: 200 ms kalp atışları yazıldı, günlük rapor kendiliğinden saklandı (maç yokken '
         + 'PASS değil, maç listesi saklanmadı), tabloya eklenen tutarsızlık için kendiliğinden tek alarm gitti; SIGKILL ile '
         + 'öldürülen süreç yeniden başlatmada çökme alarmı üretti, SIGTERM ile kapanan üretmedi');

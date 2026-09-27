@@ -79,15 +79,22 @@ async function evaluate(client, { now = new Date(), lookbackMs, heartbeatMs, set
 
   // 2. crashes: a process that started, never said it was stopping, and has
   //    since been replaced by a newer one.
+  //
+  //    Judged from EVERY retained lifecycle event, not from the look-back
+  //    window. The first version looked at the last hour only, so a process
+  //    that died two hours before the restart was outside the window when the
+  //    new one came up — and a long outage, the worst kind, raised nothing.
+  //    Each crash is still alerted once: delivery suppresses a key that was
+  //    ever sent.
   const processes = (await client.query(
     `SELECT process_instance_id,
             min(server_occurred_at) AS first_seen,
             max(server_occurred_at) AS last_seen,
             bool_or(event_type = 'process_stopping') AS stopped
        FROM telemetry_events
-      WHERE server_occurred_at >= $1
+      WHERE event_type IN ('process_started', 'process_stopping', 'telemetry_heartbeat')
       GROUP BY process_instance_id
-      ORDER BY first_seen`, [from])).rows;
+      ORDER BY first_seen`)).rows;
   for (let i = 0; i < processes.length - 1; i += 1) {
     const p = processes[i];
     const newer = processes.slice(i + 1).find((q) => q.first_seen >= p.last_seen);
@@ -144,27 +151,71 @@ async function evaluate(client, { now = new Date(), lookbackMs, heartbeatMs, set
   return alerts;
 }
 
+const retryPolicy = (env = process.env) => ({
+  baseMs: Number(env.BETA_ALERT_RETRY_BASE_MS) || 60 * 1000,
+  maxMs: Number(env.BETA_ALERT_RETRY_MAX_MS) || 60 * 60 * 1000,
+  maxAttempts: Number(env.BETA_ALERT_MAX_ATTEMPTS) || 24,
+});
+
+/**
+ * Alerts whose last delivery attempt failed and that are neither sent nor given
+ * up on — the outbox. Read from the stored alert rows, so it survives a restart
+ * and does not depend on the problem still being inside the detection window.
+ */
+async function pendingAlerts(client) {
+  const rows = (await client.query(
+    `SELECT DISTINCT ON (body->>'key') body, status
+       FROM telemetry_reports
+      WHERE kind = 'alert'
+      ORDER BY body->>'key', created_at DESC, id DESC`)).rows;
+  return rows.filter((r) => r.status === 'DELIVERY_FAILED')
+    .map((r) => ({ kind: r.body.kind, key: r.body.key, summary: r.body.summary }));
+}
+
 /**
  * Sends what has not been sent, records every outcome.
+ *
+ *   SENT / NOT_CONFIGURED / DELIVERY_ABANDONED are final: that key is never
+ *   sent again (within the 90-day report retention). A problem is reported once.
+ *   DELIVERY_FAILED is pending: retried with exponential back-off until it goes
+ *   through or `maxAttempts` failures have been recorded, and then stored as
+ *   DELIVERY_ABANDONED and logged — a terminal failure is visible, not silent.
+ *
  * @returns {Promise<{key: string, status: string}[]>}
  */
 async function deliver(client, alerts, {
   now = new Date(), webhookUrl = process.env.BETA_ALERT_WEBHOOK_URL,
-  cooldownMs = 6 * 60 * 60 * 1000, timeoutMs = 5000, fetchImpl = fetch,
+  timeoutMs = 5000, fetchImpl = fetch, policy = retryPolicy(),
 } = {}) {
   const target = webhookTarget(webhookUrl);
   const outcomes = [];
+  const store = (alert, status, error) => client.query(
+    `INSERT INTO telemetry_reports (kind, as_of, status, body, created_at)
+     VALUES ('alert', $1, $2, $3, $1)`,
+    [now, status, JSON.stringify({ kind: alert.kind, key: alert.key, summary: alert.summary, error })]);
+
   for (const alert of alerts) {
-    // Already handled inside the cool-down? A failed delivery is not
-    // "handled": it is retried on every check until it goes through.
-    const recent = await client.query(
-      `SELECT status FROM telemetry_reports
-        WHERE kind = 'alert' AND body->>'key' = $1 AND created_at > $2
-          AND status IN ('SENT', 'NOT_CONFIGURED')
-        LIMIT 1`, [alert.key, new Date(now.getTime() - cooldownMs)]);
-    if (recent.rowCount) {
+    const history = (await client.query(
+      `SELECT status, created_at FROM telemetry_reports
+        WHERE kind = 'alert' AND body->>'key' = $1
+        ORDER BY created_at DESC, id DESC`, [alert.key])).rows;
+    if (history.some((h) => ['SENT', 'NOT_CONFIGURED', 'DELIVERY_ABANDONED'].includes(h.status))) {
       outcomes.push({ key: alert.key, status: 'SUPPRESSED' });
       continue;
+    }
+    const failures = history.filter((h) => h.status === 'DELIVERY_FAILED').length;
+    if (failures >= policy.maxAttempts) {
+      await store(alert, 'DELIVERY_ABANDONED', `after_${failures}_attempts`);
+      console.error(`beta alert ABANDONED after ${failures} failed deliveries: ${alert.kind} ${alert.key}`);
+      outcomes.push({ key: alert.key, status: 'DELIVERY_ABANDONED' });
+      continue;
+    }
+    if (failures) {
+      const wait = Math.min(policy.baseMs * (2 ** (failures - 1)), policy.maxMs);
+      if (now - new Date(history[0].created_at) < wait) {
+        outcomes.push({ key: alert.key, status: 'RETRY_WAIT' });
+        continue;
+      }
     }
 
     let status;
@@ -195,13 +246,10 @@ async function deliver(client, alerts, {
       }
       if (status !== 'SENT') console.error(`beta alert delivery failed (${error}): ${alert.kind} ${alert.key}`);
     }
-    await client.query(
-      `INSERT INTO telemetry_reports (kind, as_of, status, body, created_at)
-       VALUES ('alert', $1, $2, $3, $1)`,
-      [now, status, JSON.stringify({ kind: alert.kind, key: alert.key, summary: alert.summary, error })]);
+    await store(alert, status, error);
     outcomes.push({ key: alert.key, status });
   }
   return outcomes;
 }
 
-module.exports = { evaluate, deliver, webhookTarget };
+module.exports = { evaluate, deliver, pendingAlerts, retryPolicy, webhookTarget };

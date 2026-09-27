@@ -33,33 +33,51 @@ function observe(events, { from, to, now, heartbeatMs, graceMs = 60 * 1000 }) {
   // A window that has not finished yet cannot have been covered.
   if (to > now) return result('INSUFFICIENT_DATA', [], 0, 'window has not ended yet');
 
-  const maxGap = 2 * heartbeatMs + graceMs;
+  // Each piece of evidence vouches for the time after it, up to two of ITS OWN
+  // intervals plus grace. A heartbeat says which interval it was written at; a
+  // lifecycle event uses the configured one. The first version took one interval
+  // for the whole window — the LARGEST recorded — so a single process beating
+  // hourly let every five-minute process go quiet for two hours unnoticed.
+  //
+  // And a beat can never vouch for LONGER than the interval the window is being
+  // judged at: a process configured (or misconfigured) to beat hourly must not
+  // cover for a five-minute one.
+  const allowance = (e) => {
+    const own = Number(e.details && e.details.interval_ms);
+    return 2 * (own > 0 ? Math.min(own, heartbeatMs) : heartbeatMs) + graceMs;
+  };
   const at = (e) => new Date(e.server_occurred_at).getTime();
+  const lookBehind = 2 * heartbeatMs + graceMs;
   const evidence = events
     .filter((e) => EVIDENCE_TYPES.has(e.event_type))
-    .map(at)
-    .filter((t) => t >= from.getTime() - maxGap && t < to.getTime())
-    .sort((a, b) => a - b);
+    .map((e) => ({ t: at(e), allow: allowance(e) }))
+    .filter((e) => e.t < to.getTime())
+    .sort((a, b) => a.t - b.t);
 
   const gaps = [];
   const gap = (a, b, reason) => gaps.push({
     from: new Date(a).toISOString(), to: new Date(b).toISOString(), reason,
   });
 
-  if (!evidence.length) {
+  // Evidence from before the window counts for the window's start only as far
+  // as its own allowance reaches.
+  const before = evidence.filter((e) => e.t < from.getTime());
+  const inside = evidence.filter((e) => e.t >= from.getTime());
+  if (!before.length && !inside.length) {
     gap(from.getTime(), to.getTime(), 'no_evidence');
     return result('GAP', gaps, 0);
   }
-  let previous = from.getTime();
-  // Evidence from just before the window counts as covering its start.
-  const first = evidence[0];
-  if (first - previous > maxGap) gap(previous, first, 'no_evidence');
-  previous = Math.max(previous, first);
-  for (const t of evidence) {
-    if (t - previous > maxGap) gap(previous, t, 'no_evidence');
-    previous = Math.max(previous, t);
+  let coveredUntil = before.length
+    ? Math.max(...before.map((e) => e.t + e.allow))
+    : from.getTime() + lookBehind; // nothing before: allow one normal span to the first beat
+  let lastAt = from.getTime();
+  for (const e of inside) {
+    if (e.t > coveredUntil) gap(lastAt, e.t, 'no_evidence');
+    lastAt = e.t;
+    coveredUntil = Math.max(coveredUntil, e.t + e.allow);
   }
-  if (to.getTime() - previous > maxGap) gap(previous, to.getTime(), 'no_evidence');
+  if (to.getTime() > coveredUntil) gap(lastAt, to.getTime(), 'no_evidence');
+  const inWindowEvidence = inside.length;
 
   // The measurement said itself that it could not be trusted.
   for (const e of events) {
@@ -68,8 +86,7 @@ function observe(events, { from, to, now, heartbeatMs, graceMs = 60 * 1000 }) {
     if (t >= from.getTime() && t < to.getTime()) gap(t, t, e.event_type);
   }
 
-  const inWindow = evidence.filter((t) => t >= from.getTime()).length;
-  return result(gaps.length ? 'GAP' : 'COVERED', gaps, inWindow);
+  return result(gaps.length ? 'GAP' : 'COVERED', gaps, inWindowEvidence);
 }
 
 module.exports = { observe, HOUR_MS };

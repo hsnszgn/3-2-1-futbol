@@ -81,11 +81,21 @@ async function runReport(db, telemetry, settings, now = new Date()) {
   return report;
 }
 
+/**
+ * One alert check: new problems AND the outbox. The two are separate on
+ * purpose. Detection only looks back a limited window; a delivery that failed
+ * must not depend on the problem still being inside it — the first version sent
+ * only what the current check re-detected, so an alert whose webhook was down
+ * for longer than the window was never delivered at all.
+ */
 async function runAlerts(db, settings, now = new Date()) {
   const found = await alerts.evaluate(db, {
     now, lookbackMs: settings.alertLookbackMs, heartbeatMs: settings.heartbeatMs, settleMs: settings.settleMs,
   });
-  return alerts.deliver(db, found, { now });
+  const pending = await alerts.pendingAlerts(db);
+  const byKey = new Map(pending.map((a) => [a.key, a]));
+  for (const a of found) byKey.set(a.key, a);
+  return alerts.deliver(db, [...byKey.values()], { now });
 }
 
 /**
