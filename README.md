@@ -227,8 +227,9 @@ Sunucu `http://localhost:3000` adresinde çalışır.
 
 Beta kapısı için maçların gerçekten bitip bitmediğini, iki ekranın sonucu
 gösterip göstermediğini ve sonucun yazılması gereken yere yazılıp yazılmadığını
-kaydeden bir olay tablosu var (`telemetry_events`). **Kapalı gelir** ve
-`docs/VERI-ENVANTERI.md`'deki saklama işi uygulanmadan açılmamalıdır.
+kaydeden bir olay tablosu var (`telemetry_events`). **Kapalı gelir.** Açıkken
+ham olaylar 30, saklanan raporlar 90 gün sonra sunucu tarafından silinir
+(`docs/VERI-ENVANTERI.md`); kapalıyken hiçbir silme işi çalışmaz.
 
 | Değişken | Anlamı |
 |---|---|
@@ -248,6 +249,8 @@ tercihen salt okunur bir veritabanı kullanıcısıyla:
 npm run beta:report -- --from 2026-10-01T00:00:00Z --to 2026-10-08T00:00:00Z --cohort beta-01 --format markdown
 # olaylar ile matches tablosunun iki yönlü uzlaştırması
 npm run beta:integrity -- --cohort beta-01
+# saklama: yalnız sayar; --apply ile 30 günden eski olayları ve 90 günden eski raporları siler
+npm run beta:retention
 ```
 
 Tarihler örnektir. PASS dışındaki her sonuç sıfır dışı çıkış koduyla biter.

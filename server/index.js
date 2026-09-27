@@ -12,6 +12,7 @@ const squadStore = require('./squadStore');
 const db = require('./db');
 const accounts = require('./accounts');
 const telemetry = require('./telemetry');
+const retention = require('./retention');
 const { createLimiter } = require('./rateLimit');
 const brand = require('../config/brand');
 
@@ -1894,6 +1895,20 @@ server.listen(PORT, () => {
       .catch((err) => console.error('session purge failed:', err.message));
     purge();
     setInterval(purge, 6 * 60 * 60 * 1000).unref();
+
+    // Measurement retention (M1): 30 days for raw events, 90 for stored
+    // reports. It runs only where measurement is switched on — the same switch
+    // that starts collecting starts deleting. A deployment with measurement off
+    // (production, today) never runs a delete against its database from here.
+    if (process.env.TELEMETRY_ENABLED === '1') {
+      const expire = () => retention.purge(db)
+        .then(({ events, reports }) => {
+          if (events || reports) console.log(`telemetry retention: removed ${events} event(s), ${reports} report(s)`);
+        })
+        .catch((err) => console.error('telemetry retention failed:', err.message));
+      expire();
+      setInterval(expire, Number(process.env.TELEMETRY_RETENTION_INTERVAL_MS) || 6 * 60 * 60 * 1000).unref();
+    }
   };
 
   const tryMigrate = () => {

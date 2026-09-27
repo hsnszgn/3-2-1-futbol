@@ -118,4 +118,24 @@ module.exports = `
     ON telemetry_events(event_type, server_occurred_at);
   CREATE INDEX IF NOT EXISTS telemetry_events_cohort_idx
     ON telemetry_events(beta_cohort_id, server_occurred_at);
+
+  -- Retention (M1): raw events are kept for 30 days by the time the server says
+  -- they happened. This index is what lets the purge find them without a scan.
+  CREATE INDEX IF NOT EXISTS telemetry_events_occurred_idx
+    ON telemetry_events(server_occurred_at);
+
+  -- Stored beta reports (M6), kept for 90 days. Aggregates only: the counts,
+  -- ratios and status a report printed, never raw events or anything that names
+  -- a person.
+  CREATE TABLE IF NOT EXISTS telemetry_reports (
+    id            SERIAL PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    window_from   TIMESTAMPTZ,
+    window_to     TIMESTAMPTZ,
+    as_of         TIMESTAMPTZ NOT NULL,
+    status        TEXT NOT NULL,
+    body          JSONB NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS telemetry_reports_created_idx ON telemetry_reports(created_at);
 `;

@@ -7,7 +7,7 @@ metni bunun üzerine yazılmalıdır — tahmin üzerine değil.
 Kod değiştiğinde bu belge de güncellenmelidir. Doğrulama noktaları her satırda
 dosya adıyla verilmiştir.
 
-Son kontrol: 2026-09-26
+Son kontrol: 2026-09-27
 
 ---
 
@@ -76,9 +76,23 @@ Authorization başlığı, bağlantı adresi, oyuncunun yazdığı cevap, seçti
 Kayıtlı iki oyuncunun maçında `game_id`, `matches.match_uid` ile aynıdır; yani
 `matches` tablosuna erişimi olan biri olayı iki hesaba bağlayabilir.
 
-**Saklama (henüz UYGULANMADI):** yol haritası ham olaylar için 30 gün, toplu
-raporlar için 90 gün öneriyor. Bunu silen bir iş **depoda yok**; açma kararı
-bundan ve bu belgenin gözden geçirilmesinden sonra verilmelidir.
+**Saklama (uygulandı, `server/retention.js`):** ham olaylar `server_occurred_at`
+üzerinden **30 gün**, saklanan toplu raporlar (`telemetry_reports`) `created_at`
+üzerinden **90 gün**; sınırdan kesin olarak eski olan silinir, tam sınırdaki kalır.
+Yalnız bu iki tablo; hesap, oturum ve maç satırlarına dokunulmaz (test ediliyor).
+Sunucu işi yalnız `TELEMETRY_ENABLED=1` iken çalışır (açılışta ve 6 saatte bir);
+ölçüm kapalı kurulumda — bugünkü canlı ortam — hiçbir silme çalışmaz. Elle:
+`npm run beta:retention` yalnız sayar, `--apply` ile siler.
+Doğrulama yalnız izole test veritabanında yapıldı; canlı veritabanında
+çalıştırılmadı.
+
+### `telemetry_reports` — saklanan beta raporları (**henüz yazan yok**)
+
+| Alan | İçerik | Kişisel veri mi |
+|---|---|---|
+| `kind`, `window_from`, `window_to`, `as_of`, `status` | rapor türü, kapsam, hesap anı, durum | hayır |
+| `body` | raporun sayıları: H/C/V/P/F/U, oranlar, sebep sayımları, notlar | hayır — maç kimliği listesi dahil **edilmez** |
+| `created_at` | saklama anı (90 günlük saklamanın ölçüsü) | hayır |
 
 ---
 
@@ -153,7 +167,8 @@ sağlayıcısının politikasına tabidir.
 | Oda/oyun durumu | maç süresince |
 | Davet kodu | 30 dakika |
 | Hız sınırı sayaçları | en fazla 1 saat |
-| Ölçüm olayları (`telemetry_events`) | **toplanmıyor** (varsayılan kapalı); açılırsa önerilen 30 gün — silme işi henüz yok |
+| Ölçüm olayları (`telemetry_events`) | **toplanmıyor** (varsayılan kapalı); açılırsa 30 gün, sonra otomatik silinir (`server/retention.js`) |
+| Saklanan beta raporları (`telemetry_reports`) | 90 gün, sonra otomatik silinir |
 
 **Hesap silindiğinde:** kullanıcı adı ve görünen ad anonimleştirilir, şifre
 özeti tamamen silinir, tüm oturumlar yok edilir. Maç satırları kalır — çünkü

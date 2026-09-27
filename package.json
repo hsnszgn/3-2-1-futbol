@@ -17,7 +17,8 @@
     "notices": "node scripts/third-party-notices.js",
     "build:icons": "node scripts/build-icons.js",
     "beta:report": "node scripts/beta-report.js",
-    "beta:integrity": "node scripts/check-match-integrity.js"
+    "beta:integrity": "node scripts/check-match-integrity.js",
+    "beta:retention": "node scripts/telemetry-retention.js"
   },
   "dependencies": {
     "express": "^4.19.2",

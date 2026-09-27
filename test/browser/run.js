@@ -50,7 +50,7 @@ async function resetDatabase() {
   });
   await client.connect();
   await client.query(SCHEMA);
-  await client.query('TRUNCATE matches, sessions, players, telemetry_events RESTART IDENTITY CASCADE')
+  await client.query('TRUNCATE matches, sessions, players, telemetry_events, telemetry_reports RESTART IDENTITY CASCADE')
     .catch(() => {}); // tables may not exist on the very first run
   await client.end();
 }
