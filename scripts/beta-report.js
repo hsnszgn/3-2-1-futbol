@@ -28,7 +28,7 @@
  */
 
 const { Client } = require('pg');
-const { classifyGames, summarise, verdict } = require('../server/betaMetrics');
+const { classifyGames, summarise, verdict, recoverySummary } = require('../server/betaMetrics');
 // The server's TLS policy, from the module that has no side effects. The first
 // version of this script had its own copy of the OLD rule — a regex over the
 // whole URL (so a password containing "localhost" switched TLS off for a remote
@@ -123,13 +123,6 @@ async function collect(client, { from, to, cohort, release, environment, traffic
         AND ($1::timestamptz IS NULL OR server_occurred_at >= $1)
         AND ($2::timestamptz IS NULL OR server_occurred_at < $2)`, [from, to]);
 
-  const recovery = await client.query(
-    `SELECT reason_code, count(*)::int AS n FROM telemetry_events
-      WHERE event_type = 'recovery_finished'
-        AND ($1::timestamptz IS NULL OR server_occurred_at >= $1)
-        AND ($2::timestamptz IS NULL OR server_occurred_at < $2)
-      GROUP BY reason_code ORDER BY reason_code`, [from, to]);
-
   // The stored results for exactly these games. Without them no game can be C:
   // "the row the policy called for is there" is part of C, and the first version
   // of this report decided it from the match_persisted EVENT and never read the
@@ -147,12 +140,6 @@ async function collect(client, { from, to, cohort, release, environment, traffic
     matchRows,
     liveProcesses,
     degradedEvents: degraded.rows[0].n,
-    recovery: recovery.rows,
-    // Episodes, not replays: a disconnect id repeated by Socket.IO's own retries
-    // must not raise the count of controlled interruptions.
-    recoveryEpisodes: new Set(events
-      .filter((e) => e.event_type === 'recovery_finished' && e.details && e.details.episode_id)
-      .map((e) => e.details.episode_id)).size,
   };
 }
 
@@ -186,11 +173,17 @@ function markdown(report) {
     '',
     ...Object.entries(summary.reasons).sort().map(([reason, n]) => `* ${reason}: ${n}`),
     '',
-    '## Kopma / recovery',
+    '## Kopma / recovery (bölüm başına; tekrar teslim tek sayılır)',
     '',
-    recovery.length
-      ? recovery.map((r) => `* ${r.reason_code || 'bilinmiyor'}: ${r.n}`).join('\n')
-      : '* bu pencerede kopma olayı yok',
+    recovery && recovery.episodes
+      ? [
+        `* kopma bölümü: ${recovery.episodes}`,
+        `* geri döndü ve güncel faz ekranda doğrulandı: ${recovery.recoveredVisible}`,
+        `* geri döndü ama ekran doğrulanmadı: ${recovery.recoveredNotConfirmed}`,
+        `* süre aşıldı: ${recovery.windowExpired} · oda yoktu: ${recovery.roomGone}`,
+        `* sonucu yok: ${recovery.unresolved} · çelişkili: ${recovery.contradictory}`,
+      ].join('\n')
+      : '* bu kapsamda kopma olayı yok',
     '',
     '## Gözlem sağlığı',
     '',
@@ -259,8 +252,7 @@ async function main() {
     notes: failure ? [...decision.notes, `sorgu hatası: ${failure}`] : decision.notes,
     summary,
     games: [...classified.entries()].map(([gameId, value]) => ({ gameId, ...value })),
-    recovery: data ? data.recovery : [],
-    recoveryEpisodes: data ? data.recoveryEpisodes : 0,
+    recovery: data ? recoverySummary(data.events) : null,
     degradedEvents: data ? data.degradedEvents : 0,
     limits: [
       'Aynı yanlış sonucun hem olaya hem satıra yazılması bu raporla yakalanamaz; '

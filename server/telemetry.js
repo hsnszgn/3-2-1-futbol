@@ -55,11 +55,16 @@ const EVENTS = {
   match_persist_failed: ['match_uid', 'error_kind'],
   disconnect_observed: ['episode_id', 'phase', 'round'],
   recovery_finished: ['episode_id', 'outcome', 'phase', 'round', 'away_ms'],
-  phase_rendered: ['phase', 'round', 'remaining_ms'],
+  // After a recovery: the client drew the CURRENT attempt's phase. Tied to the
+  // disconnect episode it closes, so a replay cannot count twice.
+  phase_rendered: ['phase', 'round', 'episode_id'],
   result_rendered: ['round', 'rounds_played'],
-  client_error: ['error_kind', 'phase'],
+  // Errors carry a reason code from the lists below and at most a short,
+  // server-sanitised kind — never a message or a stack, which can contain what a
+  // player typed, a token, or a connection string.
+  client_error: ['screen'],
   server_error: ['error_kind', 'where'],
-  dependency_error: ['dependency', 'error_kind'],
+  dependency_error: ['error_kind', 'operation'],
   process_started: ['node_version'],
   process_stopping: ['signal', 'pending_events'],
   telemetry_degraded: ['fault', 'dropped', 'queued'],
@@ -73,6 +78,9 @@ const EVENTS = {
 // A free-text reason would make the report's own categories unverifiable, and
 // "unknown" must stay distinguishable from "deliberately left".
 const REASONS = {
+  client_error: ['script_error', 'resource_error', 'unhandled_rejection'],
+  server_error: ['socket_handler', 'http_handler', 'unhandled_rejection', 'uncaught_exception'],
+  dependency_error: ['wikidata', 'database'],
   round_voided: ['timeout_team', 'same_team', 'no_common_players', 'timeout_guess'],
   game_aborted: ['opponent_left', 'left', 'recovery_expired', 'room_gone',
     'server_error', 'shutdown', 'unknown'],

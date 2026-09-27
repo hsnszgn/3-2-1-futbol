@@ -67,6 +67,8 @@ uygulanmadan **açılmamalıdır**.
 | `source`, `reason_code` | `server`/`client`, sözlükteki sebep kodu | hayır |
 | `details` | olay türüne göre **izin listesindeki** skaler alanlar: tur, puan, süre (ms), skorlar, kazanan taraf, faz, kopma bölüm kimliği vb. | hayır |
 
+**Hata olayları** (`server_error`, `dependency_error`, `client_error`): yalnız sabit listeden bir sebep kodu, kod/sınıf adı biçiminde kısa bir tür (`^[A-Za-z0-9_]{1,40}$`), HTTP'de rotanın deseni (istenen yol değil), soket işleyicisinin adı ve istemci için ekran adı (sabit liste). **Hata mesajı, stack ve istemcinin yazdığı metin saklanmaz**; istemci zaten yalnız tür ve ekran gönderir (tarayıcı testinde tel üzerindeki yük de kontrol ediliyor).
+
 **Yazılmayanlar (izin listesiyle zorlanıyor, test ediliyor):** kullanıcı adı,
 görünen ad, hesap kimliği, IP, cihaz/tarayıcı bilgisi, oturum jetonu, parola,
 Authorization başlığı, bağlantı adresi, oyuncunun yazdığı cevap, seçtiği takım

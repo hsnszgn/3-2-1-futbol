@@ -229,6 +229,7 @@ app.post('/api/register', limitRegister, wrap(async (req, res) => {
     res.json({ token: result.token, username: result.player.username, displayName: result.player.display_name });
   } catch (err) {
     console.error('register failed:', err.message);
+    dependencyError('database', 'register', err);
     res.status(500).json({ error: 'server_error' });
   }
 }));
@@ -254,6 +255,7 @@ app.post('/api/login', limitLogin, wrap(async (req, res) => {
     res.json({ token: result.token, username: result.player.username, displayName: result.player.display_name });
   } catch (err) {
     console.error('login failed:', err.message);
+    dependencyError('database', 'login', err);
     res.status(500).json({ error: 'server_error' });
   }
 }));
@@ -319,6 +321,7 @@ app.get('/api/leaderboard', wrap(async (req, res) => {
     res.json({ entries: await accounts.leaderboard(50), tiers: accounts.TIERS });
   } catch (err) {
     console.error('leaderboard failed:', err.message);
+    dependencyError('database', 'leaderboard', err);
     res.status(500).json({ error: 'server_error' });
   }
 }));
@@ -403,7 +406,23 @@ app.get('/debug/lookup', requireDebugAccess, limitDebug, wrap(async (req, res) =
  */
 // eslint-disable-next-line no-unused-vars -- Express needs the 4-arg shape
 app.use((err, req, res, next) => {
+  // The CLIENT's mistake, reported by the body parser: malformed JSON (400) or
+  // a body over the limit (413). These used to answer 500 "server_error" — a
+  // wrong status for the client, and, once server errors are measured, a way
+  // for anyone to inflate the server's error count with one bad request.
+  const status = err && Number.isInteger(err.status) ? err.status : 500;
+  if (status >= 400 && status < 500) {
+    if (res.headersSent) return;
+    res.status(status).json({ error: status === 413 ? 'payload_too_large' : 'bad_request' });
+    return;
+  }
   console.error(`unhandled error on ${req.method} ${req.path}:`, err && err.message);
+  // The route PATTERN, not the requested path: a path is whatever the client
+  // typed, a pattern is a string this server wrote.
+  telemetry.record('server_error', {
+    reasonCode: 'http_handler',
+    details: { where: req.route && typeof req.route.path === 'string' ? req.route.path : 'unmatched', error_kind: errorKind(err) },
+  });
   if (res.headersSent) return;
   res.status(500).json({ error: 'server_error' });
 });
@@ -442,10 +461,39 @@ const io = new Server(server, {
 // break its own connection.
 const asPayload = (raw) => (raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {});
 
+/**
+ * A short, safe name for an error, for the measurement events: its code or its
+ * class name, and only if that looks like an identifier. Never the message —
+ * a message can quote what a player typed, a token, or a connection string.
+ */
+function errorKind(err) {
+  const raw = err && (err.code || err.name);
+  return typeof raw === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(raw) ? raw : 'Error';
+}
+
+/** The game and seat a socket is playing in, if any, for an error event. */
+function gameContextOf(socket) {
+  const room = socket && socket.data ? rooms.get(socket.data.roomId) : null;
+  return room ? { gameId: room.gameId, seat: seatOf(room, socket.id) || undefined } : {};
+}
+
+/** A failed call to a service the game depends on. */
+function dependencyError(dependency, operation, err, context = {}) {
+  telemetry.record('dependency_error', {
+    ...context, reasonCode: dependency, details: { operation, error_kind: errorKind(err) },
+  });
+}
+
 function onSocketEvent(socket, event, handler) {
   socket.on(event, (raw) => {
     const fail = (err) => {
       console.error(`socket "${event}" failed for ${socket.id}:`, err && err.message);
+      // `event` is the name this server registered, never client text.
+      telemetry.record('server_error', {
+        ...gameContextOf(socket),
+        reasonCode: 'socket_handler',
+        details: { where: event, error_kind: errorKind(err) },
+      });
     };
     const payload = asPayload(raw);
     // When this message ARRIVED, taken here and nowhere else.
@@ -532,6 +580,7 @@ io.use(async (socket, next) => {
     }
   } catch (err) {
     console.error('session lookup failed:', err.message);
+    dependencyError('database', 'session_lookup', err);
   }
   next();
 });
@@ -836,6 +885,7 @@ async function sendHeadToHead(room) {
     }
   } catch (err) {
     console.error('head-to-head lookup failed:', err.message);
+    dependencyError('database', 'head_to_head', err);
   }
 }
 
@@ -1189,6 +1239,7 @@ async function sendStatsUpdate(room) {
     }
   } catch (err) {
     console.error('could not send stats update:', err.message);
+    dependencyError('database', 'stats_update', err);
   }
   sendHeadToHead(room);
 }
@@ -1296,6 +1347,7 @@ io.on('connection', (socket) => {
         // Fail closed. Keeping the old identity because the lookup broke is how
         // a revoked account goes on playing as itself.
         console.error('session re-check failed, dropping identity:', err && err.message);
+        dependencyError('database', 'session_recheck', err, gameContextOf(socket));
         if (socket.data.sessionToken === token) drop();
       })
       .finally(() => {
@@ -1327,6 +1379,13 @@ io.on('connection', (socket) => {
           away_ms: socket.data.telemetryAwaySince ? Date.now() - socket.data.telemetryAwaySince : undefined,
         },
       });
+      // The episode stays open until the client confirms it drew the current
+      // phase (phaseRendered below); only then is the recovery visible, not
+      // merely connected.
+      socket.data.telemetryAwaitingRender = {
+        episodeId: socket.data.telemetryEpisode || null,
+        gameId: room.gameId,
+      };
       socket.data.telemetryEpisode = null;
       socket.data.telemetryAwaySince = null;
       socket.to(room.id).emit('opponentReconnected');
@@ -1651,6 +1710,11 @@ io.on('connection', (socket) => {
     }
 
     if (!lookup.ok) {
+      // "lookup_failed" is the service not answering; "team_not_found" is an
+      // answer. Only the first is a dependency failure.
+      if (lookup.reason === 'lookup_failed') {
+        dependencyError('wikidata', 'common_players', { code: 'lookup_failed' }, gameContextOf(socket));
+      }
       socket.emit('guessRejected', { reason: lookup.reason, guess: safeGuess });
       return;
     }
@@ -1748,6 +1812,49 @@ io.on('connection', (socket) => {
       seat,
       source: 'client',
       details: { round: room.round, rounds_played: room.round },
+    });
+  });
+
+  // "After recovering, my screen shows the CURRENT phase." Accepted once per
+  // recovery, and only for the attempt the room is on now: a replayed notice,
+  // or one naming an attempt that has since moved on, confirms nothing. Without
+  // this, "the socket reconnected" would be counted as a recovered game even
+  // when the player was looking at a round that no longer existed.
+  onSocketEvent(socket, 'phaseRendered', ({ attempt, phase }) => {
+    const pending = socket.data.telemetryAwaitingRender;
+    if (!pending) return;
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameId !== pending.gameId) return;
+    if (!isCurrentAttempt(room, attempt) || phase !== room.state) return;
+    const seat = seatOf(room, socket.id);
+    if (!seat) return;
+    socket.data.telemetryAwaitingRender = null;
+    telemetry.record('phase_rendered', {
+      gameId: room.gameId,
+      attemptId: room.attempt,
+      seat,
+      source: 'client',
+      details: { phase: room.state, round: room.round, episode_id: pending.episodeId || undefined },
+    });
+  });
+
+  // A client's own failure: which KIND, and on which screen. Both are checked
+  // against fixed lists here, so a client cannot put text into the measurement
+  // table — and junk is dropped silently rather than refused by telemetry, which
+  // would mark the measurement degraded and let any client switch the beta
+  // report to OBSERVABILITY_GAP at will. Five per connection, at most.
+  const CLIENT_ERROR_KINDS = new Set(telemetry.REASONS.client_error);
+  const CLIENT_SCREENS = new Set(['lobby', 'auth', 'board', 'waiting', 'game', 'over', 'unknown']);
+  let clientErrorsSeen = 0;
+  onSocketEvent(socket, 'clientError', ({ kind, screen }) => {
+    if (clientErrorsSeen >= 5) return;
+    if (typeof kind !== 'string' || !CLIENT_ERROR_KINDS.has(kind)) return;
+    clientErrorsSeen += 1;
+    telemetry.record('client_error', {
+      ...gameContextOf(socket),
+      source: 'client',
+      reasonCode: kind,
+      details: { screen: typeof screen === 'string' && CLIENT_SCREENS.has(screen) ? screen : 'unknown' },
     });
   });
 
@@ -1871,9 +1978,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // A crash should be loud and fatal, not a half-dead process serving errors.
 process.on('unhandledRejection', (err) => {
   console.error('unhandled rejection:', err && err.stack ? err.stack : err);
+  telemetry.record('server_error', { reasonCode: 'unhandled_rejection', details: { where: 'process', error_kind: errorKind(err) } });
 });
 process.on('uncaughtException', (err) => {
   console.error('uncaught exception:', err && err.stack ? err.stack : err);
+  // Recorded before shutdown() so the bounded flush there can still store it.
+  telemetry.record('server_error', { reasonCode: 'uncaught_exception', details: { where: 'process', error_kind: errorKind(err) } });
   shutdown('uncaughtException');
 });
 

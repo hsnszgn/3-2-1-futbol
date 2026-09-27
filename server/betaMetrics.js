@@ -337,4 +337,54 @@ function verdict(summary, {
   return { status: 'PASS', notes };
 }
 
-module.exports = { classifyGames, gameFindings, summarise, verdict, CLASSES, FINAL_TYPES, TECHNICAL_ABORTS };
+/**
+ * Disconnections and what became of them, counted per EPISODE (roadmap M5).
+ *
+ * An episode starts with a disconnect_observed event, whose own event id is the
+ * episode id. Everything after it names that id. Three rules keep the count
+ * honest:
+ *   - a replayed or duplicated recovery_finished for the same episode counts
+ *     once; two DIFFERENT outcomes for one episode are a contradiction and are
+ *     reported, not averaged;
+ *   - "recovered" is split by whether the player's screen then showed the
+ *     CURRENT phase (a phase_rendered naming the episode). The server only
+ *     accepts that notice for the attempt the room is on, so a screen still
+ *     showing an older round never confirms a recovery;
+ *   - an episode with no outcome at all is "unresolved", never success.
+ */
+function recoverySummary(events) {
+  const seen = new Set();
+  const unique = events.filter((e) => (seen.has(e.event_id) ? false : seen.add(e.event_id)));
+  const episodes = new Map();
+  const episode = (id) => {
+    if (!episodes.has(id)) episodes.set(id, { outcomes: new Set(), rendered: false, observed: false });
+    return episodes.get(id);
+  };
+  for (const e of unique) {
+    if (e.event_type === 'disconnect_observed') episode(e.event_id).observed = true;
+    const id = e.details && e.details.episode_id;
+    if (!id) continue;
+    if (e.event_type === 'recovery_finished') episode(id).outcomes.add(e.reason_code || 'unknown');
+    if (e.event_type === 'phase_rendered') episode(id).rendered = true;
+  }
+  const out = {
+    episodes: 0, recoveredVisible: 0, recoveredNotConfirmed: 0, windowExpired: 0,
+    roomGone: 0, unresolved: 0, contradictory: 0,
+  };
+  for (const ep of episodes.values()) {
+    if (!ep.observed) continue; // an outcome whose disconnection is outside this set
+    out.episodes += 1;
+    if (ep.outcomes.size > 1) { out.contradictory += 1; continue; }
+    const [outcome] = [...ep.outcomes];
+    if (!outcome) out.unresolved += 1;
+    else if (outcome === 'recovered') out[ep.rendered ? 'recoveredVisible' : 'recoveredNotConfirmed'] += 1;
+    else if (outcome === 'window_expired') out.windowExpired += 1;
+    else if (outcome === 'room_gone') out.roomGone += 1;
+    else out.unresolved += 1;
+  }
+  return out;
+}
+
+module.exports = {
+  classifyGames, gameFindings, summarise, verdict, recoverySummary, CLASSES, FINAL_TYPES, TECHNICAL_ABORTS,
+};

@@ -667,6 +667,18 @@ socket.on('teamsRevealed', (payload) => {
  * over.
  */
 socket.on('phaseSync', (payload) => {
+  renderPhaseSync(payload);
+  // After a recovery the server wants to know the CURRENT phase is actually on
+  // screen — "the socket reconnected" is not the same as "the player sees the
+  // round". Sent after the next frame, naming the attempt that was drawn; the
+  // server ignores anything that is not the attempt it is on now. Measurement
+  // only: it grants nothing and changes nothing in play.
+  if (payload && typeof payload.attempt === 'number' && typeof payload.state === 'string') {
+    requestAnimationFrame(() => socket.emit('phaseRendered', { attempt: payload.attempt, phase: payload.state }));
+  }
+});
+
+function renderPhaseSync(payload) {
   if (!payload || typeof payload.attempt !== 'number') return;
   currentAttempt = payload.attempt;
   noteServerTime(payload.serverNow);
@@ -716,7 +728,7 @@ socket.on('phaseSync', (payload) => {
 
   // Countdown, void and the gap between rounds all resolve themselves within
   // seconds from the events that follow, so there is nothing to restore.
-});
+}
 
 // The reveal is still running, so this answer is not accepted yet. In the real
 // UI the input is not even visible before then; this covers a client that got
@@ -924,3 +936,31 @@ socket.on('rematchStarting', () => {
   roundPips.innerHTML = '';
   showScreen('game');
 });
+
+// --- client errors, for the beta measurement (M2) -----------------------------
+// What is reported is deliberately almost nothing: the KIND of failure and which
+// screen was showing. Never the message, the stack or the URL — those can carry
+// what a player typed, a token from storage, or a file path — and never more
+// than a handful per page load, so a looping error cannot flood the server.
+(() => {
+  const MAX_REPORTS = 5;
+  let sent = 0;
+  const screenNow = () => {
+    const active = document.querySelector('.screen.active');
+    return active && active.id ? active.id.replace(/^screen-/, '') : 'unknown';
+  };
+  const report = (kind) => {
+    if (sent >= MAX_REPORTS) return;
+    sent += 1;
+    try {
+      socket.emit('clientError', { kind, screen: screenNow() });
+    } catch (err) {
+      // Reporting a failure must never become a second failure.
+    }
+  };
+  window.addEventListener('error', (event) => {
+    // A failed <img>/<script> load arrives here too, with no error object.
+    report(event && event.error ? 'script_error' : 'resource_error');
+  }, true);
+  window.addEventListener('unhandledrejection', () => report('unhandled_rejection'));
+})();

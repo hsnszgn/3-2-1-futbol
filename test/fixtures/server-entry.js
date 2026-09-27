@@ -55,6 +55,11 @@ global.fetch = async (url) => {
   }
 
   if (str.includes('sparql')) {
+    // A Wikidata outage, through the REAL lookup code: the query service
+    // answers 503, exactly as it does when it is overloaded.
+    if (process.env.TEST_WIKIDATA_DOWN === '1') {
+      return { ok: false, status: 503, json: async () => ({}), text: async () => 'unavailable' };
+    }
     const q = decodeURIComponent(str);
     const block = (name) => {
       // Character classes instead of backslash escapes: the escaping was wrong
@@ -146,6 +151,20 @@ if (process.env.TEST_MIGRATE_DELAY_MS) {
   db.migrate = async () => {
     await new Promise((resolve) => setTimeout(resolve, delay));
     return realMigrate();
+  };
+}
+
+// A socket handler that throws, on demand. The error MESSAGE carries the guess
+// verbatim — which is exactly why the measurement must never store a message:
+// the test plants a secret in the guess and then looks for it in the table.
+if (process.env.TEST_THROW_ON_GUESS) {
+  const gameLogic = require('../../server/gameLogic');
+  const realMatch = gameLogic.matchPlayerName;
+  gameLogic.matchPlayerName = (guess, players) => {
+    if (String(guess).includes(process.env.TEST_THROW_ON_GUESS)) {
+      throw new Error(`matching exploded on "${guess}"`);
+    }
+    return realMatch(guess, players);
   };
 }
 
