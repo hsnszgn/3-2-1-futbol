@@ -41,8 +41,15 @@ module.exports = async function run({ databaseUrl }) {
 
     // 2. A local, unencrypted database is not staging — and the password in the
     //    URL is never printed.
-    const withPassword = databaseUrl.replace('postgres://postgres@', 'postgres://postgres:s3cretPW@');
-    assert.notStrictEqual(withPassword, databaseUrl, 'the test URL did not take a password');
+    // CI's URL already carries a password (the first version string-replaced
+    // "postgres@" and found nothing to replace there); then that real password
+    // is the secret checked for. Otherwise a marker password is added — the
+    // local test database trusts any password.
+    const parsed = new URL(databaseUrl);
+    if (!parsed.password) parsed.password = 's3cretPW';
+    const secret = decodeURIComponent(parsed.password);
+    const withPassword = parsed.toString();
+    assert.ok(secret.length >= 6 && withPassword.includes(`:${parsed.password}@`), 'the test URL did not take a password');
     {
       const r = check({ STAGING_DATABASE_URL: withPassword, TELEMETRY_ENVIRONMENT: 'staging' });
       assert.strictEqual(r.code, 1);
@@ -54,7 +61,7 @@ module.exports = async function run({ databaseUrl }) {
       assert.strictEqual(status(r.out, 'tls_handshake'), 'FAIL', 'a plaintext connection was accepted');
       assert.strictEqual(status(r.out, 'separation'), 'UNKNOWN', 'an unchecked separation was not reported as UNKNOWN');
       assert.strictEqual(status(r.out, 'measurement_isolation'), 'PASS');
-      assert.ok(!/s3cretPW/.test(r.stdout + r.stderr), 'the password was printed');
+      assert.ok(!(r.stdout + r.stderr).includes(secret), 'the password was printed');
       notes.push('yerel/şifresiz bağlantı: tls_policy ve tls_handshake FAIL, ayrım UNKNOWN, sonuç NOT_READY; parola çıktıda yok');
     }
 
