@@ -100,6 +100,8 @@ Yazanlar (yalnız `TELEMETRY_ENABLED=1` iken): günlük rapor (`kind='daily'`, t
 
 `telemetry_events` içindeki `telemetry_heartbeat` olayları yalnız aralığı taşır (kişisel veri yok).
 
+Bağımsız izleyici (`scripts/beta-watch.js`, oyun sürecinin dışında çalışır) aynı tabloya aynı biçimde alarm kaydı yazar: `service_outage` / `service_recovered` (anahtar: ortam adı ve son kalp atışının zamanı; özet: sağlık ucunun durum kodu veya kalp atışının yaşı). Veritabanına ulaşamadığında kanala doğrudan `watcher_db_unreachable` gönderir (yalnız hata kodu). İzleyici oyun verisi, kullanıcı adı veya IP okumaz; sağlık ucu (`/healthz`) yalnız `ok` döner.
+
 ---
 
 ## 2. Bellekte tutulan, kalıcı olmayan veriler

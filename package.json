@@ -18,7 +18,9 @@
     "build:icons": "node scripts/build-icons.js",
     "beta:report": "node scripts/beta-report.js",
     "beta:integrity": "node scripts/check-match-integrity.js",
-    "beta:retention": "node scripts/telemetry-retention.js"
+    "beta:retention": "node scripts/telemetry-retention.js",
+    "beta:watch": "node scripts/beta-watch.js",
+    "staging:check": "node scripts/staging-check.js"
   },
   "dependencies": {
     "express": "^4.19.2",

@@ -1,0 +1,57 @@
+# The independent watcher, by hand only (staging preparation; docs/STAGING.md).
+#
+# Deliberately NO `schedule:` trigger. A scheduled run would start using runner
+# minutes and sending alerts on its own, and where the watcher runs — and at
+# what cadence — is an open decision (docs/STAGING.md, "Onay gerektirenler").
+# test/ci-workflow.test.js fails if a schedule is added without that decision
+# being recorded there.
+#
+# Secrets it reads (Settings → Secrets and variables → Actions); none exist
+# until they are created for staging:
+#   STAGING_REPORT_DATABASE_URL  the STAGING database, never production
+#   STAGING_HEALTH_URL           https://<staging host>/healthz
+#   STAGING_ALERT_WEBHOOK_URL    the alert channel's HTTPS webhook
+# With a secret missing the run fails (exit 2 / 1); it never reports healthy.
+
+name: Staging izleyici (elle)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'once = tek kontrol; test-alert = kanala tek deneme uyarısı'
+        type: choice
+        options: ['once', 'test-alert']
+        default: 'once'
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          cache: npm
+
+      - name: Install (lockfile only, no dev tools)
+        run: npm ci --omit=dev
+
+      - name: Watch
+        env:
+          REPORT_DATABASE_URL: ${{ secrets.STAGING_REPORT_DATABASE_URL }}
+          BETA_WATCH_HEALTH_URL: ${{ secrets.STAGING_HEALTH_URL }}
+          BETA_ALERT_WEBHOOK_URL: ${{ secrets.STAGING_ALERT_WEBHOOK_URL }}
+          TELEMETRY_ENVIRONMENT: staging
+          MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$MODE" = "test-alert" ]; then
+            node scripts/beta-watch.js --test-alert
+          else
+            node scripts/beta-watch.js --once
+          fi

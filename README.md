@@ -242,6 +242,8 @@ ham olaylar 30, saklanan raporlar 90 gün sonra sunucu tarafından silinir
 | `BETA_ALERT_WEBHOOK_URL` | Alarmların gideceği webhook; yalnız HTTPS (veya aynı makine). Yoksa alarmlar NOT_CONFIGURED olarak saklanır. |
 | `BETA_ALERT_RETRY_BASE_MS` / `BETA_ALERT_MAX_ATTEMPTS` | Gönderilemeyen alarmın ilk yeniden deneme beklemesi (varsayılan 1 dk, her denemede iki katı, en çok 1 sa) ve deneme sınırı (varsayılan 24); sınırda `DELIVERY_ABANDONED` saklanır ve loglanır. |
 | `BETA_ALERT_INTERVAL_MS` / `BETA_REPORT_INTERVAL_MS` | Alarm kontrolü (varsayılan 5 dk) ve saklanan rapor (varsayılan 24 sa) aralığı. |
+| `BETA_WATCH_HEALTH_URL` | Bağımsız izleyicinin yokladığı sağlık ucu (`https://<ortam>/healthz`). İzleyici `REPORT_DATABASE_URL`, `BETA_ALERT_WEBHOOK_URL`, `TELEMETRY_ENVIRONMENT`, `TELEMETRY_HEARTBEAT_MS` değişkenlerini de okur. |
+| `STAGING_DATABASE_URL` / `PRODUCTION_DATABASE_HOST` | Yalnız `staging:check` için: kontrol edilecek staging adresi ve karşılaştırılacak üretim **ana makine adı** (URL değil). |
 | `TELEMETRY_REQUIRE_DURABLE_START=1` | Maçın başlangıcı veritabanına yazılamazsa maç başlatılmaz, oyunculara söylenir. Yalnız ölçüm açıkken geçerli. |
 
 Raporlar salt okunurdur ve hiçbir şeyi düzeltmez. Bağlantı adresi komut satırından
@@ -255,6 +257,11 @@ npm run beta:report -- --from 2026-10-01T00:00:00Z --to 2026-10-08T00:00:00Z --c
 npm run beta:integrity -- --cohort beta-01
 # saklama: yalnız sayar; --apply ile 30 günden eski olayları ve 90 günden eski raporları siler
 npm run beta:retention
+# Bağımsız izleyici: oyun kapalıyken de kesinti alarmı (docs/STAGING.md)
+npm run beta:watch -- --once          # 0 sağlıklı, 1 kesinti, 2 izleyici çalışamadı
+npm run beta:watch -- --test-alert    # alarm kanalına tek deneme uyarısı
+# Staging ön kontrolü (salt-okunur; STAGING_DATABASE_URL okur, DATABASE_URL'i okumaz)
+npm run staging:check
 ```
 
 Tarihler örnektir. PASS dışındaki her sonuç sıfır dışı çıkış koduyla biter; `--gate` ile çıkış kodu yayın kapısına (rapor PASS **ve** son 72 saat kesintisiz gözlenmiş, içinde gerçek maç var) bağlanır. Kalp atışı kanıtı olmayan, boşluklu veya bitmemiş bir pencere PASS olamaz.
