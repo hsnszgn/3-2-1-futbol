@@ -67,6 +67,9 @@ const EVENTS = {
   dependency_error: ['error_kind', 'operation'],
   process_started: ['node_version'],
   process_stopping: ['signal', 'pending_events'],
+  // Positive evidence that measurement was running (M6): written at a fixed
+  // interval, so the 72-hour window can tell silence from a dead process.
+  telemetry_heartbeat: ['interval_ms'],
   telemetry_degraded: ['fault', 'dropped', 'queued'],
   // Written by the queue itself, never by a caller: the same event id arriving
   // twice with DIFFERENT content is a contradiction, and the spec is explicit

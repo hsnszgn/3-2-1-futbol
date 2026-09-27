@@ -126,6 +126,15 @@ async function startTestServer(env = {}) {
       child.kill('SIGKILL');
       await new Promise((resolve) => child.once('exit', resolve));
     },
+    /** A graceful stop (SIGTERM), the way a deploy ends a process. */
+    async terminate(timeoutMs = 15000) {
+      if (exited) return;
+      const done = new Promise((resolve) => child.once('exit', resolve));
+      child.kill('SIGTERM');
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      await done;
+      clearTimeout(timer);
+    },
   };
 }
 

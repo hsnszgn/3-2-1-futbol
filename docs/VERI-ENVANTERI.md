@@ -88,13 +88,17 @@ Sunucu işi yalnız `TELEMETRY_ENABLED=1` iken çalışır (açılışta ve 6 sa
 Doğrulama yalnız izole test veritabanında yapıldı; canlı veritabanında
 çalıştırılmadı.
 
-### `telemetry_reports` — saklanan beta raporları (**henüz yazan yok**)
+### `telemetry_reports` — saklanan beta raporları ve alarm kayıtları
 
 | Alan | İçerik | Kişisel veri mi |
 |---|---|---|
 | `kind`, `window_from`, `window_to`, `as_of`, `status` | rapor türü, kapsam, hesap anı, durum | hayır |
 | `body` | raporun sayıları: H/C/V/P/F/U, oranlar, sebep sayımları, notlar | hayır — maç kimliği listesi dahil **edilmez** |
 | `created_at` | saklama anı (90 günlük saklamanın ölçüsü) | hayır |
+
+Yazanlar (yalnız `TELEMETRY_ENABLED=1` iken): günlük rapor (`kind='daily'`, toplu sayılar, maç listesi **yok**) ve alarm kayıtları (`kind='alert'`: tür, anahtar, kısa özet, teslim durumu). Alarm anahtarı ve özeti rastgele maç/süreç kimliği içerebilir; kişi adı, hesap, mesaj veya jeton içermez. Alarm aynı içerikle `BETA_ALERT_WEBHOOK_URL` adresine gider — o adresin sahibi **üçüncü taraf veri alıcısı** olur ve 4. bölüme eklenmelidir; henüz hiçbir adres yapılandırılmadı.
+
+`telemetry_events` içindeki `telemetry_heartbeat` olayları yalnız aralığı taşır (kişisel veri yok).
 
 ---
 

@@ -13,6 +13,7 @@ const db = require('./db');
 const accounts = require('./accounts');
 const telemetry = require('./telemetry');
 const retention = require('./retention');
+const betaMonitor = require('./betaMonitor');
 const { createLimiter } = require('./rateLimit');
 const brand = require('../config/brand');
 
@@ -2018,6 +2019,9 @@ server.listen(PORT, () => {
         .catch((err) => console.error('telemetry retention failed:', err.message));
       expire();
       setInterval(expire, Number(process.env.TELEMETRY_RETENTION_INTERVAL_MS) || 6 * 60 * 60 * 1000).unref();
+
+      // Heartbeat, alerts and the daily report (M6), on the same switch.
+      betaMonitor.start({ db, telemetry });
     }
   };
 

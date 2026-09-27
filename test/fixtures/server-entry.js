@@ -39,7 +39,7 @@ const PLAYERS = [
 // slowness can be dialled in.
 const LOOKUP_DELAY_MS = Number(process.env.TEST_LOOKUP_DELAY_MS || 20);
 
-global.fetch = async (url) => {
+global.fetch = async (url, options) => {
   const str = String(url);
   await new Promise((r) => setTimeout(r, LOOKUP_DELAY_MS));
 
@@ -98,7 +98,10 @@ global.fetch = async (url) => {
     };
   }
 
-  return realFetch(url);
+  // Everything that is not Wikidata goes out for real, WITH its options. The
+  // first version passed only the URL, so a POST (an alert webhook) arrived as
+  // a GET with an empty body.
+  return realFetch(url, options);
 };
 
 // Port allocation: the runner used to hand down a random port, which collided

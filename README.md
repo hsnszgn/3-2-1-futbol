@@ -238,6 +238,9 @@ ham olaylar 30, saklanan raporlar 90 gün sonra sunucu tarafından silinir
 | `TELEMETRY_TRAFFIC_KIND` | `human_beta` / `automated` / `manual_qa`. Yoksa `automated` — yani ayar unutulursa trafik **insan sayılmaz**. İstemci bunu değiştiremez. |
 | `TELEMETRY_COHORT_ID` | Beta grubunun adı, raporda filtre. |
 | `RELEASE_SHA` | Çalışan sürüm (Render'da `RENDER_GIT_COMMIT` kendiliğinden okunur). |
+| `TELEMETRY_HEARTBEAT_MS` | Kalp atışı aralığı (varsayılan 5 dk). 72 saatlik gözlem bu kanıtla yargılanır. |
+| `BETA_ALERT_WEBHOOK_URL` | Alarmların gideceği webhook; yalnız HTTPS (veya aynı makine). Yoksa alarmlar NOT_CONFIGURED olarak saklanır. |
+| `BETA_ALERT_INTERVAL_MS` / `BETA_REPORT_INTERVAL_MS` | Alarm kontrolü (varsayılan 5 dk) ve saklanan rapor (varsayılan 24 sa) aralığı. |
 | `TELEMETRY_REQUIRE_DURABLE_START=1` | Maçın başlangıcı veritabanına yazılamazsa maç başlatılmaz, oyunculara söylenir. Yalnız ölçüm açıkken geçerli. |
 
 Raporlar salt okunurdur ve hiçbir şeyi düzeltmez. Bağlantı adresi komut satırından
@@ -253,7 +256,7 @@ npm run beta:integrity -- --cohort beta-01
 npm run beta:retention
 ```
 
-Tarihler örnektir. PASS dışındaki her sonuç sıfır dışı çıkış koduyla biter.
+Tarihler örnektir. PASS dışındaki her sonuç sıfır dışı çıkış koduyla biter; `--gate` ile çıkış kodu yayın kapısına (rapor PASS **ve** son 72 saat kesintisiz gözlenmiş, içinde gerçek maç var) bağlanır. Kalp atışı kanıtı olmayan, boşluklu veya bitmemiş bir pencere PASS olamaz.
 İki komut **aynı maç kümesine** bakar (başlangıç olayına göre `[from, to)`, aynı
 grup/sürüm/ortam/trafik türü filtreleri; `--traffic-kind` varsayılanı `human_beta`).
 Rapor, kaydedilmesi gereken maçların `matches` satırlarını **gerçekten okur**: satır

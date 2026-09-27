@@ -29,6 +29,12 @@ const REPORT = path.join(__dirname, '..', 'scripts', 'beta-report.js');
 const INTEGRITY = path.join(__dirname, '..', 'scripts', 'check-match-integrity.js');
 
 const PROCESS_LIVE = 'proc-live';
+// Synthetic data sits in the PAST: a report no longer judges a window that has
+// not ended, because an unfinished window cannot have been observed.
+const GAME_TIME = new Date(Date.now() - 24 * 60 * 60 * 1000);
+const WIN_FROM = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+const WIN_TO = new Date(Date.now() - 60 * 1000).toISOString();
+const HEARTBEAT_MS = 5 * 60 * 1000;
 const PROCESS_GONE = 'proc-gone';
 
 function run(script, args, env) {
@@ -54,7 +60,7 @@ function event(overrides) {
     game_id: null,
     attempt_id: null,
     seat: null,
-    server_occurred_at: new Date('2026-10-02T12:00:00Z'),
+    server_occurred_at: GAME_TIME,
     environment: 'beta',
     traffic_kind: 'human_beta',
     beta_cohort_id: 'beta-01',
@@ -130,6 +136,21 @@ function brokenGame(gameId) {
 /** Finished, but only one screen reported it: unprovable, so U. */
 function unprovenGame(gameId) {
   return completeGame(gameId).filter((row) => !(row.event_type === 'result_rendered' && row.seat === 'B'));
+}
+
+/**
+ * Heartbeats every 5 minutes across [from, to): the evidence the report now
+ * requires before it may call a window observed.
+ */
+async function insertHeartbeats(client, from = WIN_FROM, to = WIN_TO) {
+  await client.query(
+    `INSERT INTO telemetry_events (event_id, schema_version, event_type, server_occurred_at,
+       environment, traffic_kind, beta_cohort_id, release_sha, process_instance_id, source, details)
+     SELECT 'hb-' || g, 1, 'telemetry_heartbeat',
+            $1::timestamptz - interval '5 minutes' + g * interval '5 minutes',
+            'beta', 'human_beta', 'beta-01', 'sha-1', 'proc-heartbeat', 'server', $3::jsonb
+       FROM generate_series(0, (extract(epoch FROM ($2::timestamptz - $1::timestamptz)) / 300)::int + 1) AS g`,
+    [from, to, JSON.stringify({ interval_ms: HEARTBEAT_MS })]);
 }
 
 async function insert(client, rows) {
@@ -389,7 +410,8 @@ module.exports = async function run_({ databaseUrl }) {
         ...completeGame('cli-robot').map((row) => ({ ...row, traffic_kind: 'automated' })),
       ]);
 
-      const json = await run(REPORT, ['--from', '2026-10-01T00:00:00Z', '--to', '2026-10-09T00:00:00Z',
+      await insertHeartbeats(client);
+      const json = await run(REPORT, ['--from', WIN_FROM, '--to', WIN_TO,
         '--cohort', 'beta-01', '--format', 'json', '--min-games', '3'],
       { REPORT_DATABASE_URL: databaseUrl, DATABASE_URL: '' });
       const report = JSON.parse(json.stdout);
@@ -403,7 +425,7 @@ module.exports = async function run_({ databaseUrl }) {
       assert.ok(report.scope.asOf, 'the report does not say when it was computed');
       assert.ok(report.limits.length >= 3, 'the report does not state what it cannot prove');
 
-      const md = await run(REPORT, ['--from', '2026-10-01T00:00:00Z', '--to', '2026-10-09T00:00:00Z',
+      const md = await run(REPORT, ['--from', WIN_FROM, '--to', WIN_TO,
         '--cohort', 'beta-01', '--min-games', '1000'],
       { REPORT_DATABASE_URL: databaseUrl, DATABASE_URL: '' });
       assert.ok(md.stdout.includes('INSUFFICIENT_DATA'),
@@ -447,6 +469,7 @@ module.exports = async function run_({ databaseUrl }) {
          VALUES ('rapor_a', 'rapor_a', 'x'), ('rapor_b', 'rapor_b', 'x') RETURNING id`)).rows.map((r) => r.id);
       const ids = ['row-1', 'row-2', 'row-3'];
       await insert(client, ids.flatMap((id) => completeGame(id, { persist: true })));
+      await insertHeartbeats(client);
       const writeRows = async () => {
         await client.query('DELETE FROM matches');
         for (const id of ids) {
@@ -456,7 +479,7 @@ module.exports = async function run_({ databaseUrl }) {
         }
       };
       const report = async () => {
-        const r = await run(REPORT, ['--cohort', 'beta-01', '--format', 'json', '--min-games', '3'],
+        const r = await run(REPORT, ['--from', WIN_FROM, '--to', WIN_TO, '--cohort', 'beta-01', '--format', 'json', '--min-games', '3'],
           { REPORT_DATABASE_URL: databaseUrl, DATABASE_URL: '' });
         return { code: r.code, body: JSON.parse(r.stdout) };
       };

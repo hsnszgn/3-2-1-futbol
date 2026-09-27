@@ -22,29 +22,16 @@
  *  * `as_of` is printed. Events can arrive late; the same window recomputed
  *    later may say something different, and the reader has to be able to see
  *    which run they are holding.
- *  * A failed query or a degraded measurement is OBSERVABILITY_GAP, never PASS
+ *  * A failed query, a degraded measurement, or a window without continuous
+ *    heartbeat evidence is OBSERVABILITY_GAP or INSUFFICIENT_DATA — never PASS
  *    with empty numbers.
+ *  * `--gate` makes the exit code follow the release gate (report PASS AND the
+ *    last 72 hours continuously observed with real games), not just the report.
  *  * Percentages are never printed without the raw counts beside them.
  */
 
 const { Client } = require('pg');
-const { classifyGames, summarise, verdict, recoverySummary } = require('../server/betaMetrics');
-// The server's TLS policy, from the module that has no side effects. The first
-// version of this script had its own copy of the OLD rule — a regex over the
-// whole URL (so a password containing "localhost" switched TLS off for a remote
-// host) and no removal of sslmode (so ?sslmode=no-verify switched verification
-// off). Review found both holes open again here.
-const { sslConfigFor } = require('../server/dbTls');
-
-/**
- * The pg client configuration for a report connection: exactly the server's TLS
- * decision. Throws for an address whose target is ambiguous — the caller exits
- * rather than connecting somewhere it cannot vouch for.
- */
-function clientConfig(url, env = process.env) {
-  const cfg = sslConfigFor(url, env);
-  return { connectionString: cfg.connectionString, ssl: cfg.ssl };
-}
+const { collect, buildReport, markdown, clientConfig } = require('../server/betaReport');
 
 function parseArgs(argv) {
   const args = { format: 'markdown' };
@@ -58,13 +45,19 @@ function parseArgs(argv) {
   return args;
 }
 
+function isoOrNull(value, label) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error(`--${label} is not a date: ${value}`);
+  return date;
+}
+
 /**
  * The game set both commands work on. One function, so the report and the
  * reconciliation cannot quietly look at two different windows.
  */
 function scopeFromArgs(args) {
   return {
-    asOf: new Date().toISOString(),
     from: isoOrNull(args.from, 'from'),
     to: isoOrNull(args.to, 'to'),
     cohort: args.cohort || null,
@@ -76,128 +69,6 @@ function scopeFromArgs(args) {
   };
 }
 
-function isoOrNull(value, label) {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw new Error(`--${label} is not a date: ${value}`);
-  return date;
-}
-
-async function collect(client, { from, to, cohort, release, environment, trafficKind }) {
-  // Which games the window owns: decided by the START event alone, so a long
-  // game cannot fall out of every window.
-  const started = await client.query(
-    `SELECT game_id FROM telemetry_events
-      WHERE event_type = 'game_started'
-        AND traffic_kind = $1
-        AND ($2::timestamptz IS NULL OR server_occurred_at >= $2)
-        AND ($3::timestamptz IS NULL OR server_occurred_at < $3)
-        AND ($4::text IS NULL OR beta_cohort_id = $4)
-        AND ($5::text IS NULL OR release_sha = $5)
-        AND ($6::text IS NULL OR environment = $6)
-        AND game_id IS NOT NULL`,
-    [trafficKind, from, to, cohort, release, environment]);
-  const gameIds = [...new Set(started.rows.map((r) => r.game_id))];
-
-  const events = gameIds.length
-    ? (await client.query(
-      `SELECT event_id, event_type, game_id, attempt_id, seat, source, reason_code,
-              details, traffic_kind, environment, beta_cohort_id, release_sha,
-              process_instance_id, server_occurred_at
-         FROM telemetry_events WHERE game_id = ANY($1)`, [gameIds])).rows
-    : [];
-
-  // A process that started and never said it was stopping is either still up or
-  // was killed. The DB cannot tell which, so a game on such a process counts as
-  // in progress (P) and the report says that this is an approximation.
-  const processes = await client.query(
-    `SELECT process_instance_id,
-            bool_or(event_type = 'process_stopping') AS stopped
-       FROM telemetry_events GROUP BY process_instance_id`);
-  const liveProcesses = new Set(processes.rows.filter((r) => !r.stopped)
-    .map((r) => r.process_instance_id));
-
-  const degraded = await client.query(
-    `SELECT count(*)::int AS n FROM telemetry_events
-      WHERE event_type IN ('telemetry_degraded', 'telemetry_conflict')
-        AND ($1::timestamptz IS NULL OR server_occurred_at >= $1)
-        AND ($2::timestamptz IS NULL OR server_occurred_at < $2)`, [from, to]);
-
-  // The stored results for exactly these games. Without them no game can be C:
-  // "the row the policy called for is there" is part of C, and the first version
-  // of this report decided it from the match_persisted EVENT and never read the
-  // table — with every row missing it said PASS with C=100. If this query fails,
-  // collect() throws and the report is an OBSERVABILITY_GAP, not a pass.
-  const matchRows = gameIds.length
-    ? (await client.query(
-      `SELECT id, match_uid, player_a, player_b, score_a, score_b, winner_id, played_at
-         FROM matches WHERE match_uid = ANY($1)`, [gameIds])).rows
-    : [];
-
-  return {
-    gameIds,
-    events,
-    matchRows,
-    liveProcesses,
-    degradedEvents: degraded.rows[0].n,
-  };
-}
-
-function markdown(report) {
-  const { scope, summary, status, notes, recovery, degradedEvents, limits } = report;
-  const pct = (value) => (value === null ? 'hesaplanamadı' : `%${value}`);
-  const lines = [
-    `# Beta ölçüm raporu — ${status}`,
-    '',
-    `* as_of: ${scope.asOf}`,
-    `* pencere (başlangıç zamanına göre, [from, to)): ${scope.from || 'açık'} → ${scope.to || 'açık'}`,
-    `* grup: ${scope.cohort || 'hepsi'} · sürüm: ${scope.release || 'hepsi'} · ortam: ${scope.environment || 'hepsi'}`,
-    `* trafik türü: ${scope.trafficKind}`,
-    '',
-    '## Sayılar',
-    '',
-    '| Sınıf | Anlamı | Sayı |',
-    '|---|---|---|',
-    `| H | başlatılmış tekil maç | ${summary.H} |`,
-    `| C | tamamlandı (sunucu sonucu + iki ekran bildirimi + skor tutarlı + beklenen kayıt) | ${summary.counts.C} |`,
-    `| V | bilinçli terk (teknik hata/kopma öncesinde yok) | ${summary.counts.V} |`,
-    `| P | hâlâ devam ediyor | ${summary.counts.P} |`,
-    `| F | teknik hata veya tutarlılık kontrolü başarısız | ${summary.counts.F} |`,
-    `| U | kanıt eksik / nedeni açıklanamıyor | ${summary.counts.U} |`,
-    '',
-    `* toplam tamamlanma C/H: ${pct(summary.totalCompletionPct)} (${summary.counts.C}/${summary.H})`,
-    `* teknik tamamlanma C/(H−V): ${pct(summary.technicalCompletionPct)} `
-      + `(${summary.counts.C}/${summary.technicalDenominator})`,
-    '',
-    '## Sınıflandırma gerekçeleri',
-    '',
-    ...Object.entries(summary.reasons).sort().map(([reason, n]) => `* ${reason}: ${n}`),
-    '',
-    '## Kopma / recovery (bölüm başına; tekrar teslim tek sayılır)',
-    '',
-    recovery && recovery.episodes
-      ? [
-        `* kopma bölümü: ${recovery.episodes}`,
-        `* geri döndü ve güncel faz ekranda doğrulandı: ${recovery.recoveredVisible}`,
-        `* geri döndü ama ekran doğrulanmadı: ${recovery.recoveredNotConfirmed}`,
-        `* süre aşıldı: ${recovery.windowExpired} · oda yoktu: ${recovery.roomGone}`,
-        `* sonucu yok: ${recovery.unresolved} · çelişkili: ${recovery.contradictory}`,
-      ].join('\n')
-      : '* bu kapsamda kopma olayı yok',
-    '',
-    '## Gözlem sağlığı',
-    '',
-    `* ölçüm arıza/çelişki olayı: ${degradedEvents}`,
-    `* durum notları: ${notes.join('; ') || 'yok'}`,
-    '',
-    '## Bu raporun kanıtlamadıkları',
-    '',
-    ...limits.map((l) => `* ${l}`),
-    '',
-  ];
-  return lines.join('\n');
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const url = process.env.REPORT_DATABASE_URL || process.env.DATABASE_URL || '';
@@ -206,9 +77,7 @@ async function main() {
       + 'never taken from the command line.');
     process.exit(2);
   }
-
   const scope = scopeFromArgs(args);
-
   let config;
   try {
     config = clientConfig(url);
@@ -217,61 +86,29 @@ async function main() {
     process.exit(2);
   }
   const client = new Client(config);
-
-  let data = null;
-  let queryFailed = false;
-  let failure = null;
+  let report;
   try {
     await client.connect();
-    data = await collect(client, scope);
+    report = await buildReport(client, scope, {
+      minGames: Number(args['min-games'] || 100),
+      minTechnicalPct: Number(args['min-technical'] || 98),
+      heartbeatMs: args['heartbeat-ms'] ? Number(args['heartbeat-ms']) : undefined,
+    });
   } catch (err) {
-    queryFailed = true;
-    failure = err.message;
+    // connect() failing lands here: still a report, still not a pass.
+    report = await buildReport({ query: async () => { throw err; } }, scope, {});
   } finally {
     await client.end().catch(() => {});
   }
-
-  const classified = data
-    ? classifyGames(data.events, { liveProcesses: data.liveProcesses, matchRows: data.matchRows })
-    : new Map();
-  const summary = summarise(classified);
-  const decision = verdict(summary, {
-    minGames: Number(args['min-games'] || 100),
-    minTechnicalPct: Number(args['min-technical'] || 98),
-    degradedEvents: data ? data.degradedEvents : 0,
-    queryFailed,
-  });
-
-  const report = {
-    scope: {
-      ...scope,
-      from: scope.from ? scope.from.toISOString() : null,
-      to: scope.to ? scope.to.toISOString() : null,
-    },
-    status: decision.status,
-    notes: failure ? [...decision.notes, `sorgu hatası: ${failure}`] : decision.notes,
-    summary,
-    games: [...classified.entries()].map(([gameId, value]) => ({ gameId, ...value })),
-    recovery: data ? recoverySummary(data.events) : null,
-    degradedEvents: data ? data.degradedEvents : 0,
-    limits: [
-      'Aynı yanlış sonucun hem olaya hem satıra yazılması bu raporla yakalanamaz; '
-        + 'pozitif/negatif cevap testleri ve kullanıcı bildirimi ayrıca gerekir.',
-      'İnsan trafiği, sunucunun trafiği human_beta olarak etiketlemesine dayanır; '
-        + 'bu bir "kesin insan tespiti" değildir.',
-      'P sınıfı bir yaklaşıklıktır: process_stopping olayı olmayan bir süreç ya yaşıyordur '
-        + 'ya da öldürülmüştür, veritabanı ikisini ayırt edemez.',
-      'PASS yalnız bu sayılar hakkındadır; yayın kararı değildir.',
-    ],
-  };
 
   if ((args.format || 'markdown') === 'json') {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {
     process.stdout.write(markdown(report));
   }
-  // A non-zero exit for anything that is not a pass, so a scheduler notices.
-  process.exit(decision.status === 'PASS' ? 0 : 1);
+  // Non-zero for anything that is not a pass, so a scheduler notices.
+  const passed = args.gate === 'true' ? report.gate === 'PASS' : report.status === 'PASS';
+  process.exit(passed ? 0 : 1);
 }
 
 if (require.main === module) {
@@ -281,4 +118,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, collect, markdown, clientConfig, scopeFromArgs };
+module.exports = { parseArgs, collect, markdown, clientConfig, scopeFromArgs, buildReport };
