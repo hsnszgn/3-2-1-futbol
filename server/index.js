@@ -1006,6 +1006,37 @@ function onThisAttempt(room, fn, delayMs) {
 }
 
 /**
+ * Like onThisAttempt, but runs `fn` NO EARLIER than the absolute time `at`.
+ *
+ * A timer can fire about a millisecond before Date.now() says the delay has
+ * passed (the timer clock and Date.now() are truncated separately; measured on
+ * Node 22 and 24: roughly 2% of timers, 1 ms early). For the guess window that
+ * millisecond mattered: openGuess went out at guessOpensAt - 1 and advertised
+ * more time than the window had (CI failure on 480f724), an answer sent at once
+ * could be refused as early, and the round could be voided while the answer
+ * gate still accepted answers. The remainder is simply waited out.
+ *
+ * `room.timer` is updated on a re-arm so clearTimer() still cancels it.
+ */
+function onThisAttemptAt(room, fn, at) {
+  const attempt = room.attempt;
+  const arm = () => {
+    const handle = setTimeout(() => {
+      if (rooms.get(room.id) !== room || room.attempt !== attempt) return;
+      if (at - Date.now() > 0) {
+        const next = arm();
+        // Only if nothing else took the slot in the meantime.
+        if (room.timer === handle) room.timer = next;
+        return;
+      }
+      fn();
+    }, Math.max(0, at - Date.now()));
+    return handle;
+  };
+  return arm();
+}
+
+/**
  * Ends the current attempt and schedules what comes next.
  *
  * Announcing the void is not enough on its own. The attempt used to stay
@@ -1103,20 +1134,20 @@ function resolveTeamsPhase(room) {
   clearTimer(room);
   // An explicit "you may answer now", so neither the client nor a test has to
   // re-derive the opening from the reveal hold.
-  room.timer = onThisAttempt(room, () => {
+  room.timer = onThisAttemptAt(room, () => {
     io.to(room.id).emit('openGuess', phaseTiming(room, {
       timeoutMs: Math.max(0, room.guessClosesAt - Date.now()),
       opensAt: room.guessOpensAt,
       closesAt: room.guessClosesAt,
     }));
 
-    room.timer = onThisAttempt(room, () => {
+    room.timer = onThisAttemptAt(room, () => {
       if (room.playerGuessResolved) return;
       voidRound(room, 'timeout_guess', room.round >= MAX_ROUNDS
         ? () => endGame(room)
         : () => startRound(room));
-    }, Math.max(0, room.guessClosesAt - Date.now()));
-  }, REVEAL_HOLD_MS);
+    }, room.guessClosesAt);
+  }, room.guessOpensAt);
 }
 
 function scoresForClient(room) {

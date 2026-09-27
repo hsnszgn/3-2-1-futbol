@@ -11,6 +11,17 @@
 // at a file that cannot exist makes the fixture the only source of truth.
 process.env.SQUAD_SNAPSHOT_PATH = require('path').join(__dirname, 'no-snapshot-on-purpose.json');
 
+// Timers that fire EARLY. Node really does this — about 2% of timers run
+// 1 ms before Date.now() says their delay has passed — but a millisecond now
+// and then cannot be tested on purpose. TEST_TIMER_EARLY_MS makes every server
+// timer early by a fixed amount, so the code that must not act before an
+// absolute instant can be checked deterministically.
+const TIMER_EARLY_MS = Number(process.env.TEST_TIMER_EARLY_MS || 0);
+if (TIMER_EARLY_MS > 0) {
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, delay, ...args) => realSetTimeout(fn, Math.max(0, (Number(delay) || 0) - TIMER_EARLY_MS), ...args);
+}
+
 const realFetch = global.fetch;
 
 const CLUBS = {

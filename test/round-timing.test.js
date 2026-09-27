@@ -58,6 +58,44 @@ async function reachGuessPhase(a, b, teams = ['Chelsea', 'Liverpool']) {
 module.exports = async function run() {
   const notes = [];
 
+  // --- 0. timers that fire early do not move the window ---------------------
+  // CI on 480f724 (Node 22): "the opening advertised more time (25001ms) than
+  // the window has (25000ms)". The open timer fired 1 ms before guessOpensAt,
+  // which Node timers do now and then. Made deterministic here: every server
+  // timer fires 50 ms early. The window's edges are absolute instants and must
+  // hold anyway — the opening is not announced before guessOpensAt, and the
+  // round is not voided before guessClosesAt while the answer gate still
+  // accepts answers.
+  {
+    const server = await startTestServer({
+      TEST_TIMER_EARLY_MS: '50', PLAYER_GUESS_MS: '3000', TEST_LOOKUP_DELAY_MS: '1',
+    });
+    try {
+      const [a, b] = await pair(server);
+      const { reveal, open } = await reachGuessPhase(a, b);
+      assert.ok(open.serverNow >= open.opensAt,
+        `openGuess was sent ${open.opensAt - open.serverNow}ms before the window opened`);
+      assert.ok(open.timeoutMs <= reveal.timeoutMs,
+        `the opening advertised more time (${open.timeoutMs}ms) than the window has (${reveal.timeoutMs}ms)`);
+
+      // Same machine, same clock: aim a correct answer 20 ms before the close.
+      const outcome = Promise.race([
+        waitFor(a, 'roundResult', 10000).then((r) => ({ scored: r })),
+        waitFor(a, 'roundVoid', 10000).then((v) => ({ voided: v.reason })),
+      ]);
+      await sleep(Math.max(0, open.closesAt - 20 - Date.now()));
+      submit(a, 'submitGuess', { guess: 'Mohamed Salah' });
+      const got = await outcome;
+      assert.ok(got.scored, `an answer sent 20ms before the close lost to the timeout: ${JSON.stringify(got)}`);
+      notes.push('sunucu zamanlayıcıları 50 ms erken ateşlenirken: pencere açılışı guessOpensAt\'ten önce duyurulmadı, '
+        + 'kapanıştan 20 ms önce gönderilen doğru cevap zaman aşımına yenilmeden puan aldı');
+      a.close();
+      b.close();
+    } finally {
+      await server.stop();
+    }
+  }
+
   // --- 1. the window is the server's, and it is published --------------------
   {
     const server = await startTestServer();
