@@ -123,6 +123,20 @@ gerçek beta verisi yok.
 | Saklama işinin gerçek veritabanında çalışması | Yalnız izole test veritabanında doğrulandı | Staging veritabanında `npm run beta:retention` (önce varsayılan deneme, sonra `--apply`) |
 | B3: Neon TLS zinciri | Hedef sağlayıcının zinciriyle hiç denenmedi | Staging veritabanı adresiyle bağlantı ve `DB_SSL` ayarsız (doğrulamalı) açılış |
 
+### Render ayarı ile depo arasındaki kopukluk (açık)
+
+Panelden doğrulandı (2026-09-28): servis `render.yaml`'ı kullanmıyor. Otomatik
+dağıtım "On Commit"; `main`'e her push canlıya gidiyor — `36f7ab1`…`ec2d55a`
+bu yolla onaysız canlıya çıktı. Başarısız dağıtım `5e57a53` (yalnız belge):
+Node **26.10.0** (`engines: ">=22.0.0"` sınırsız aralıktan seçildi; CI 22 ve
+24'ü test ediyor), `npm install`, `node server/index.js`, sonra "Port scan
+timeout". Son başarılı: `ec2d55a`. Port hatasının kök nedeni **doğrulanmadı**:
+Node 26 ile yerel başlangıç başarılı (IPv4 `0.0.0.0:10000`, `/healthz` 200) —
+bu Render ortamının birebir tekrarı değil (ek build adımı, IPv6 yok).
+Düzeltme adayı: `.node-version` = 24.21.0, `engines` = `22.x || 24.x`,
+kilit dosyası uyumlu, `test/runtime-pin.test.js`. Render'ın sürüm seçim sırası
+(resmi belgeye göre): `NODE_VERSION` > `.node-version` > `.nvmrc` > `engines`.
+
 ### Staging hazırlığı
 
 Kurulum ve doğrulama adımları, açık kalan işler ve **onay gerektiren kararların
